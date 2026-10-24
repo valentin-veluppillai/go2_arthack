@@ -28,20 +28,18 @@ go2/
 │   └── __main__.py      # Entry point (stdio transport)
 ├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
 ├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map), PUB on port 5560
+├── go2_yolo/            # YOLO pose detection on the camera stream (python -m go2_yolo)
+│   └── __main__.py      # SUB camera → YOLO → window + PUB boxes/keypoints on port 5557
+├── go2_follow/          # Keep a person in frame from YOLO boxes, SPACE = deadman (python -m go2_follow)
 ├── go2_viz/             # Human–robodog co-creation view of the map (python -m go2_viz, http://localhost:8090)
 │   ├── __main__.py      # FastAPI: go2_map (ZMQ) or a PLY file + surface normals → WebSocket; inputs SUB on 5561
+│   ├── feed.py          # go2_yolo pose detections → viz inputs (python -m go2_viz.feed)
 │   ├── send.py          # CLI to send inputs (python -m go2_viz.send distance=0.6 velocity=0.8 …)
 │   └── static/          # three.js renderer: base + focus particle pools, input → visual mapping (viz.js)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
 ├── requirements_map.txt
-├── go2_yolo/            # YOLO detection on the camera stream (python -m go2_yolo)
-│   └── __main__.py      # SUB camera → YOLO → window + PUB on port 5557
-├── go2_follow/          # Keep a person in frame from YOLO boxes, SPACE = deadman (python -m go2_follow)
-├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
-├── go2_py311/           # Python 3.11 venv (not committed)
-├── requirements_bridge.txt
 ├── requirements_yolo.txt
 ├── requirements_follow.txt
 ├── requirements_viz.txt
@@ -84,6 +82,9 @@ python -m go2_follow
 
 # Particle-swarm view of the map (deps: pip install -r requirements_viz.txt)
 python -m go2_viz
+
+# Live viz inputs from go2_yolo's pose detections (needs go2_yolo and go2_viz running)
+python -m go2_viz.feed
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):
@@ -135,6 +136,12 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
 | `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
 | `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives human/robot inputs from robot-data publishers |
+| `GO2_VIZ_PARAM_HOST` | `localhost` | Host running `go2_viz` (for `go2_viz.feed` / `go2_viz.send`) |
+| `GO2_YOLO_PUB_PORT` | `5557` | `go2_yolo` detections PUB port |
+| `GO2_YOLO_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_yolo` (for `go2_follow`, `go2_viz.feed`) |
+| `GO2_YOLO_MODEL` | `yolo26n-pose.pt` | YOLO weights; pose models add keypoints to the detections |
+| `GO2_FEED_HFOV` | `120` | Front camera horizontal FOV (°) used by `go2_viz.feed` for bearing/distance |
+| `GO2_FEED_VEL_FULL` | `0.4` | Keypoint speed (box heights/s) that maps to velocity 1 |
 
 ## ZMQ Protocol
 

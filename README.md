@@ -201,7 +201,7 @@ Indoor ceilings would cover the map, so points more than 1.5 m above the robot's
 **Map stream.** `go2_map` also publishes the cleaned map once per second on port 5560 as `[b"occupancy", meta_json, float32 xyz]` (meta: `stamp`, `count`, `voxel`, `z_ref`, `robot` pose) for other apps such as `go2_viz`.
 
 **PLY export.** When you stop `go2_map` with Ctrl+C it writes the whole map (moving objects removed, no ceiling cut) as a binary PLY with height colours, `go2_map_<timestamp>.ply` in the current directory. Set `GO2_MAP_PLY=path.ply` for a fixed name or `GO2_MAP_PLY=0` to skip it.
-=======
+
 ### 7. YOLO Object Detection
 
 `go2_yolo` subscribes to the camera stream, runs [Ultralytics YOLO](https://docs.ultralytics.com) on the newest frame, shows the annotated feed in a window and republishes the results on its own PUB socket (port 5557). It doesn't need the Unitree SDK, so it can run in any Python 3.9+ environment on a machine that can reach the bridge.
@@ -213,18 +213,20 @@ GO2_YOLO_SHOW=0 python -m go2_yolo          # headless, only publishes
 GO2_YOLO_DEVICE=mps python -m go2_yolo      # Apple GPU (use 0 for CUDA)
 ```
 
-The model weights (`yolo11n.pt` by default) are downloaded on first run. Frames that arrive while a frame is being processed are dropped, so detection always runs on the latest image.
+The model weights (`yolo26n-pose.pt` by default, a pose model) are downloaded on first run. Frames that arrive while a frame is being processed are dropped, so detection always runs on the latest image.
 
 | Topic (port 5557) | Payload |
 |-------|---------|
 | `camera_yolo` | Annotated JPEG bytes |
-| `detections` | JSON: `{"ts", "width", "height", "detections": [{"cls", "conf", "box": [x1, y1, x2, y2]}]}` |
+| `detections` | JSON: `{"ts", "width", "height", "detections": [{"cls", "conf", "box": [x1, y1, x2, y2], "keypoints"}]}` |
+
+With a pose model every detection also carries `keypoints`: the 17 COCO body joints as `[x, y, conf]` in pixels (nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles). Detection-only models leave the field out.
 
 ### 8. Person Follow
 
 `go2_follow` keeps a person in the camera frame using the YOLO detections. It picks the largest person and applies two simple rules:
 
-- **Turn:** box centre in the left / right 30 % of the image → turn left / right
+- **Turn:** box centre in the left / right 40 % of the image → turn left / right
 - **Distance:** box smaller than 5 % of the frame → walk forward; larger than 20 % → walk backward
 
 **Deadman switch:** the robot only moves while **SPACE is held** in the follower window. Releasing it, or the window losing focus, sends an immediate `stop`. If the follower crashes, the bridge's 250 ms movement timeout stops the robot.
@@ -284,6 +286,28 @@ pub.send_multipart([b"viz", json.dumps({"distance": 0.8, "velocity": 0.6}).encod
 ```
 
 For testing from the shell: `python -m go2_viz.send distance=0.6 velocity=0.8 entropy=0.3 confidence=0.9 scale=0.7`. Unknown keys are ignored (and logged); the last values are also sent to browsers that connect later. The HUD shows when inputs last arrived.
+
+**Live inputs from the camera.** `python -m go2_viz.feed` turns `go2_yolo`'s pose detections into these inputs and publishes them about 10 times per second. It follows the largest confident person:
+
+| Input | Computed from |
+|-------|---------------|
+| `humanBearing` | Offset of the box centre from the image centre, through the camera's horizontal field of view (`GO2_FEED_HFOV`) |
+| `distance` | Pinhole estimate from the torso length (shoulders → hips, `GO2_FEED_TORSO`) and the box height (`GO2_FEED_PERSON_H`), the nearer of the two |
+| `scale` | Share of the frame the box covers, 1 at `GO2_FEED_SCALE_FULL` |
+| `confidence` | Mean keypoint confidence |
+| `velocity` | Mean keypoint speed in box heights per second, minus keypoint jitter, 1 at `GO2_FEED_VEL_FULL` |
+| `entropy` | Normalised Shannon entropy of the velocity over the last `GO2_FEED_ENTROPY_S` seconds: 0 when movement is steady, 1 when erratic |
+| `trackHuman` | `true` while a person is seen; `headYaw` / `headPitch` stay 0, as the Go2 has no separate head |
+
+Without a person for `GO2_FEED_LOST_S` the inputs go back to neutral (5 m, no movement, no confidence, scale 0, head straight ahead). The robot turning moves the whole image, so it counts as human movement. The distance is a rough estimate: calibrate `GO2_FEED_HFOV` and the body sizes for your camera and people.
+
+```bash
+python -m go2_bridge          # terminal 1 (with GO2_NETWORK_INTERFACE set)
+python -m go2_map             # terminal 2: live map
+GO2_YOLO_SHOW=0 python -m go2_yolo   # terminal 3: pose detection
+python -m go2_viz             # terminal 4: http://localhost:8090
+python -m go2_viz.feed        # terminal 5: detections → viz inputs
+```
 
 ## ZMQ Protocol
 
@@ -393,16 +417,16 @@ All settings via environment variables:
 | `GO2_MAP_FILTER_CELL` | `0.1` | Cell size in metres of the occupancy grid used by the filter |
 | `GO2_MAP_PLY` | `go2_map_<timestamp>.ply` | Map file written on exit (`0` = off) |
 | `GO2_YOLO_PUB_PORT` | `5557` | YOLO results PUB port |
-| `GO2_YOLO_MODEL` | `yolo11n.pt` | YOLO weights (name or path) |
+| `GO2_YOLO_MODEL` | `yolo26n-pose.pt` | YOLO weights (name or path) |
 | `GO2_YOLO_CONF` | `0.4` | Detection confidence threshold |
 | `GO2_YOLO_DEVICE` | auto | Inference device (`cpu`, `mps`, `0`, …) |
 | `GO2_YOLO_SHOW` | `1` | Show the annotated feed in a window |
 | `GO2_YOLO_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_yolo` (for `go2_follow`) |
-| `GO2_FOLLOW_EDGE` | `0.3` | Turn when the person's centre is within this fraction of the left/right edge |
+| `GO2_FOLLOW_EDGE` | `0.4` | Turn when the person's centre is within this fraction of the left/right edge |
 | `GO2_FOLLOW_AREA_FAR` | `0.05` | Walk forward when the person box is smaller than this fraction of the frame |
 | `GO2_FOLLOW_AREA_NEAR` | `0.20` | Walk backward when the person box is larger than this fraction of the frame |
 | `GO2_FOLLOW_VX` | `0.3` | Forward/backward speed (m/s) |
-| `GO2_FOLLOW_VYAW` | `0.6` | Turn speed (rad/s) |
+| `GO2_FOLLOW_VYAW` | `0.7` | Turn speed (rad/s) |
 | `GO2_FOLLOW_CONF` | `0.5` | Minimum confidence for a person detection |
 | `GO2_MAP_PUB_PORT` | `5560` | Port on which `go2_map` publishes the cleaned map |
 | `GO2_MAP_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_map` (for `go2_viz`) |
@@ -410,6 +434,15 @@ All settings via environment variables:
 | `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
 | `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
 | `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives human/robot inputs from robot-data publishers |
+| `GO2_VIZ_PARAM_HOST` | `localhost` | Host running `go2_viz` (for `go2_viz.feed` and `go2_viz.send`) |
+| `GO2_FEED_HFOV` | `120` | Horizontal field of view of the front camera (°), for bearing and distance |
+| `GO2_FEED_PERSON_H` | `1.7` | Assumed body height (m) for the distance estimate |
+| `GO2_FEED_TORSO` | `0.5` | Assumed shoulder-to-hip length (m) for the distance estimate |
+| `GO2_FEED_CONF` | `0.5` | Minimum confidence for a person detection |
+| `GO2_FEED_SCALE_FULL` | `0.25` | Box share of the frame that gives scale 1 |
+| `GO2_FEED_VEL_FULL` | `0.4` | Keypoint speed (box heights/s) that gives velocity 1 |
+| `GO2_FEED_ENTROPY_S` | `3` | Window for the entropy (s) |
+| `GO2_FEED_LOST_S` | `1.0` | No person for this long → neutral inputs |
 
 ## Writing Custom Clients
 

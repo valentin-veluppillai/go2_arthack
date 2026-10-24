@@ -5,7 +5,10 @@ shows the annotated feed in a window and republishes the results on its
 own ZMQ PUB socket:
 
     [b"camera_yolo", annotated_jpeg]
-    [b"detections",  json]   {"ts", "width", "height", "detections": [{"cls", "conf", "box"}]}
+    [b"detections",  json]   {"ts", "width", "height", "detections": [{"cls", "conf", "box", "keypoints"}]}
+
+With a pose model (the default) every detection also carries "keypoints":
+17 COCO body joints as [x, y, conf] in pixels; detection models leave it out.
 """
 
 from __future__ import annotations
@@ -75,7 +78,7 @@ class LatestFrame:
 
 def to_detections(result) -> list[dict]:
     names = result.names
-    return [
+    detections = [
         {
             "cls": names[int(c)],
             "conf": round(float(p), 3),
@@ -83,6 +86,10 @@ def to_detections(result) -> list[dict]:
         }
         for xyxy, c, p in zip(result.boxes.xyxy, result.boxes.cls, result.boxes.conf)
     ]
+    if result.keypoints is not None and result.keypoints.has_visible:
+        for det, kpts in zip(detections, result.keypoints.data.tolist()):
+            det["keypoints"] = [[round(x, 1), round(y, 1), round(c, 3)] for x, y, c in kpts]
+    return detections
 
 
 def main() -> None:
