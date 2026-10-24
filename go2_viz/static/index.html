@@ -12,6 +12,7 @@
     #hud { position: fixed; top: 12px; left: 12px; padding: 10px 12px; border-radius: 8px;
            background: rgba(30, 31, 35, 0.72); backdrop-filter: blur(6px); min-width: 220px; }
     #hud .row { display: flex; justify-content: space-between; gap: 16px; }
+    #hud .mapping { color: var(--muted); font-size: 11px; margin-top: 4px; }
     #hud .label { color: var(--muted); }
     #hud .live { color: #5ad17a; } #hud .stale { color: #e0b040; } #hud .off { color: #e05a5a; }
     #actions { margin-top: 8px; display: flex; gap: 6px; }
@@ -37,7 +38,11 @@
     <div class="row"><span class="label">map points</span><span id="points">0</span></div>
     <div class="row"><span class="label">map updates</span><span id="updates">0</span></div>
     <div class="row"><span class="label">last update</span><span id="age">–</span></div>
-    <div class="row"><span class="label">robot params</span><span id="remote">–</span></div>
+    <div class="row"><span class="label">robot</span><span id="robotsrc">–</span></div>
+    <div class="row"><span class="label">points in cone</span><span id="cone">0</span></div>
+    <div class="row"><span class="label">focus particles</span><span id="focus">0</span></div>
+    <div class="row"><span class="label">inputs</span><span id="remote">–</span></div>
+    <div class="row mapping"><span id="mapping">–</span></div>
     <div class="row"><span class="label">fps</span><span id="fps">0</span></div>
     <div id="actions">
       <button id="snapshot" title="Save the current frame as PNG">Snapshot</button>

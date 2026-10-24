@@ -6,19 +6,24 @@ go2_map's PUB socket (port 5560) or from a PLY file (GO2_VIZ_PLY), which is
 reloaded whenever it changes. Every new map is pushed to all browsers over a
 WebSocket; the swarm then flows to the new geometry.
 
-Visual parameters can be driven from robot data: any process can connect a
+The visualization is driven by human/robot inputs: any process can connect a
 ZMQ PUB socket to tcp://<this host>:5561 and send [b"viz", json] with any of
-    particles     number of particles (density)
-    paintColor    colour for particles in the robot's field of view, "#rrggbb",
-                  or "height" for the height colours
-    jitter        0–1, erratic twitching in place
-    noise         0–5, flow field strength
-    markerChance  0–1, chance that a particle is drawn as a marker
-The latest values are forwarded to every browser, which eases into them.
+    distance      human–robot distance, m (0.3–5)           → jitter
+    velocity      human movement, 0–1                       → density in the view cone
+    entropy       interaction entropy, 0–1                  → dispersion in the view cone
+    confidence    posture confidence, 0–1                   → colour saturation
+    scale         perceived human scale, 0–1                → share of diamond/crosshair markers
+    headYaw       head yaw relative to the body, degrees
+    headPitch     head pitch, degrees
+    coneAngle     view cone angle, degrees (15–90)
+    trackHuman    true = the head follows the human
+    humanBearing  direction of the human relative to the body, degrees
+The browser maps these to the visual parameters; the latest values are
+forwarded to every browser, which eases into them.
 
 WebSocket messages: the map is binary (uint32 header length, JSON header,
-padding to a multiple of 4 bytes, then float32 x, y, z triples); parameter
-updates are text, {"params": {...}}.
+padding to a multiple of 4 bytes, then float32 x, y, z triples followed by
+float32 surface normals); input updates are text, {"params": {...}}.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import numpy as np
 import uvicorn
 import zmq
 import zmq.asyncio
+from scipy.spatial import cKDTree
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,7 +52,9 @@ VIZ_HOST = os.getenv("GO2_VIZ_HOST", "0.0.0.0")
 VIZ_PORT = int(os.getenv("GO2_VIZ_PORT", "8090"))
 VIZ_MAX_POINTS = int(os.getenv("GO2_VIZ_MAX_POINTS", "80000"))  # sent to the browser
 VIZ_PARAM_PORT = int(os.getenv("GO2_VIZ_PARAM_PORT", "5561"))  # SUB binds here; publishers connect
-REMOTE_PARAMS = {"particles", "paintColor", "jitter", "noise", "markerChance"}
+REMOTE_PARAMS = {"distance", "velocity", "entropy", "confidence", "scale",
+                 "headYaw", "headPitch", "coneAngle", "trackHuman", "humanBearing"}
+NORMAL_NEIGHBOURS = 12
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("go2_viz")
@@ -86,13 +94,26 @@ def load_ply(path: str) -> np.ndarray:
     return np.stack([rec["x"], rec["y"], rec["z"]], axis=1).astype(np.float32)
 
 
+def estimate_normals(points: np.ndarray) -> np.ndarray:
+    """Unit surface normal per point: direction of least spread among its nearest neighbours (PCA)."""
+    if len(points) <= NORMAL_NEIGHBOURS:
+        return np.tile(np.array([0, 0, 1], dtype=np.float32), (len(points), 1))
+    _, idx = cKDTree(points).query(points, k=NORMAL_NEIGHBOURS, workers=-1)
+    nb = points[idx] - points[idx].mean(axis=1, keepdims=True)
+    _, vecs = np.linalg.eigh(np.einsum("nki,nkj->nij", nb, nb))  # eigenvalues ascending
+    return vecs[:, :, 0].astype(np.float32)
+
+
 def encode(points: np.ndarray, meta: dict) -> bytes:
-    """Thin the cloud to VIZ_MAX_POINTS (evenly, so consecutive maps stay similar) and pack it."""
+    """Thin the cloud to VIZ_MAX_POINTS (evenly, so consecutive maps stay similar), add normals, pack it."""
     if len(points) > VIZ_MAX_POINTS:
         points = points[np.linspace(0, len(points) - 1, VIZ_MAX_POINTS).astype(int)]
+    points = points.astype(np.float64)
+    normals = estimate_normals(points)
     header = json.dumps({**meta, "count": len(points)}).encode()
     pad = (-(4 + len(header))) % 4
-    return struct.pack("<I", len(header)) + header + b" " * pad + points.astype("<f4").tobytes()
+    return (struct.pack("<I", len(header)) + header + b" " * pad
+            + points.astype("<f4").tobytes() + normals.astype("<f4").tobytes())
 
 
 async def broadcast(message: bytes) -> None:
@@ -153,7 +174,7 @@ async def zmq_source() -> None:
             _topic, meta_raw, data = await sub.recv_multipart()
             meta = json.loads(meta_raw)
             points = np.frombuffer(data, dtype="<f4").reshape(-1, 3)
-            await broadcast(encode(points, {**meta, "source": "go2_map"}))
+            await broadcast(await asyncio.to_thread(encode, points, {**meta, "source": "go2_map"}))
     finally:
         sub.close()
         ctx.term()
@@ -169,8 +190,8 @@ async def ply_source(path: str) -> None:
                 points = load_ply(path)
                 mtime = current
                 log.info("Loaded %d points from %s", len(points), path)
-                await broadcast(encode(points, {"source": os.path.basename(path), "stamp": current,
-                                                "z_ref": None, "robot": None}))
+                await broadcast(await asyncio.to_thread(encode, points, {
+                    "source": os.path.basename(path), "stamp": current, "z_ref": None, "robot": None}))
         except Exception:
             log.exception("Could not read %s", path)
         await asyncio.sleep(1.0)

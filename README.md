@@ -201,9 +201,20 @@ Indoor ceilings would cover the map, so points more than 1.5 m above the robot's
 
 **PLY export.** When you stop `go2_map` with Ctrl+C it writes the whole map (moving objects removed, no ceiling cut) as a binary PLY with height colours, `go2_map_<timestamp>.ply` in the current directory. Set `GO2_MAP_PLY=path.ply` for a fixed name or `GO2_MAP_PLY=0` to skip it.
 
-### 7. Swarm Visualization
+### 7. Co-Creation Visualization
 
-`go2_viz` is a browser app that renders the occupancy map as a particle swarm and keeps rendering continuously while the map updates. Each particle is tied to a map point: a spring pulls it there, a time-varying flow field makes it drift, and now and then it hops to a point in the same or an adjacent 40 cm cell, so the swarm crawls over walls and objects. When a new map arrives, every particle gets a new target in the cell of its old one and about 10 % are sent to random spots of the new map, so the swarm stays put and grows into newly mapped areas instead of jumping.
+`go2_viz` is a browser app that renders the room from the occupancy map as particles and keeps rendering continuously while the map and the human/robot inputs change. It implements the human–robodog co-creation spec:
+
+| Input | Range | Visual effect |
+|-------|-------|---------------|
+| Human–robot **distance** | 0.3 – 5 m | **Jitter** ∝ 1/d², normalised to 1 at ≤ 1 m and 0 at ≥ 3 m: vibration along the surface normals; below 1 m some particles also tear off the surface for a frame |
+| Human **movement / velocity** | 0 – 1 | **Density in the view cone**: focus particles ×1 (sparse trickle) to ×15 (burst) |
+| Interaction **entropy** | 0 – 1 | **Dispersion** of the focus particles: on the surface at 0, an aerosol cloud up to 0.5 m off the surfaces at 1 |
+| Posture **confidence** | 0 – 1 | **Saturation** of the in-cone colouring: monochrome at 0, full colour at 1 |
+| Perceived human **scale** | 0 – 1 | Share of particles drawn as **diamond / crosshair** markers instead of circles |
+| Head **yaw / pitch**, **cone angle** | °, 15 – 90° | **Zone of interest**: particles inside the cone take on a faked time-of-flight colour (viridis by distance from the head); outside they decay back to gray |
+
+How it works: a calm **base pool** of particles covers the whole room. A second **focus pool** only takes spots inside the view cone; its size is the number of map points in the cone × focus density × (1 + 14 · velocity), so the cone gets denser with movement whether it is narrow or wide. When the cone moves, focus particles whose spot drops out fade out and reappear inside the cone, so nothing flies through empty space. Surface normals for jitter and dispersion are computed on the server (PCA over each point's 12 nearest neighbours).
 
 ```bash
 pip install -r requirements_viz.txt
@@ -211,27 +222,31 @@ python -m go2_viz                                  # live from go2_map (port 556
 GO2_VIZ_PLY=go2_map_20261024_173512.ply python -m go2_viz   # from a saved map, reloaded when the file changes
 ```
 
-Open http://localhost:8090. The base look is calm and low-contrast: 4 000 crisp gray dots drifting slowly on a dark gray background, no trails. The panel on the right changes the generation parameters live: particle count, spring strength, damping, flow field strength/scale/speed, how often particles hop, jitter (erratic twitching in place, off by default), how many sit on the floor, point size, opacity, colour mode (gray, height, speed, white), ceiling cut and camera rotation. The Markers folder lets a share of the particles appear as matplotlib-style markers (`o s ^ v < > D d p h 8 * P X + x`) instead of plain circles: **marker chance** is the probability per particle, **changes / s** how often a marker particle switches to another marker, and **outline chance** the probability that a new marker is drawn as outline only. Particles inside the robot's field of view, a cone at its head, take on their height colour and desaturate back to gray after they leave it; field-of-view angle, range and desaturation time are in the Robot folder. **Snapshot** saves the current frame as PNG, **Record** records the frame stream as WebM. The HUD shows the data source, link state, map size and how long ago the last map arrived.
+Open http://localhost:8090. The panel has the test controls from the spec: **Human** (distance, gesture velocity, posture confidence, detected scale, bearing) and **Robot & canvas** (head yaw/pitch, cone angle, head tracks human, entropy). A simulated human (a translucent column) stands at the given distance and bearing; with *head tracks human* the head turns towards it. Without a robot pose (e.g. a PLY file) a virtual robot stands in the middle of the map. The swarm's own behaviour (base particles, focus density, spring, flow drift, hops, size, opacity, colours, view range, desaturation time, marker changes, camera) is in the collapsed **Tuning** folder. The HUD shows the data source, robot source, points and focus particles in the cone, and the current mapping (jitter, dispersion, saturation, marker share). **Snapshot** saves the current frame as PNG, **Record** records the frame stream as WebM.
 
 The server sends at most 80 000 points to the browser (`GO2_VIZ_MAX_POINTS`), thinned evenly so consecutive maps stay similar.
 
-**Driving the look from robot data.** `go2_viz` binds a ZMQ SUB socket on port 5561 (`GO2_VIZ_PARAM_PORT`). Any number of processes can connect a PUB socket to it and send `[b"viz", json]` with any subset of these parameters; browsers ease into new numbers over about half a second, so noisy sensor data doesn't flicker:
+**Driving it from robot data.** `go2_viz` binds a ZMQ SUB socket on port 5561 (`GO2_VIZ_PARAM_PORT`). Any number of processes can connect a PUB socket to it and send `[b"viz", json]` with any subset of the inputs; browsers ease into new numbers over about half a second, so noisy sensor data doesn't flicker:
 
-| Key | Range | Effect |
-|-----|-------|--------|
-| `particles` | 1 000 – 60 000 | Number of particles (density); added particles fade in on the map |
-| `paintColor` | `"#rrggbb"` or `"height"` | Colour of particles in the robot's field of view |
-| `jitter` | 0 – 1 | Erratic twitching in place |
-| `noise` | 0 – 5 | Flow field strength |
-| `markerChance` | 0 – 1 | Chance that a particle is drawn as a marker |
+| Key | Range | Meaning |
+|-----|-------|---------|
+| `distance` | 0.3 – 5 | Human–robot distance (m) |
+| `velocity` | 0 – 1 | Human movement |
+| `entropy` | 0 – 1 | Interaction entropy |
+| `confidence` | 0 – 1 | Posture confidence |
+| `scale` | 0 – 1 | Perceived human scale |
+| `headYaw`, `headPitch` | °, ±180 / ±60 | Head direction relative to the body |
+| `coneAngle` | 15 – 90 | View cone, full angle (°) |
+| `trackHuman` | `true` / `false` | Head follows the human |
+| `humanBearing` | ±180 | Direction of the human relative to the body (°) |
 
 ```python
 pub = zmq.Context().socket(zmq.PUB)
 pub.connect("tcp://localhost:5561")
-pub.send_multipart([b"viz", json.dumps({"jitter": 0.4, "paintColor": "#ff8c1a"}).encode()])
+pub.send_multipart([b"viz", json.dumps({"distance": 0.8, "velocity": 0.6}).encode()])
 ```
 
-For testing from the shell: `python -m go2_viz.send particles=12000 jitter=0.6 paintColor=#ff8c1a`. Unknown keys are ignored (and logged); the last values are also sent to browsers that connect later. The HUD shows when robot parameters last arrived.
+For testing from the shell: `python -m go2_viz.send distance=0.6 velocity=0.8 entropy=0.3 confidence=0.9 scale=0.7`. Unknown keys are ignored (and logged); the last values are also sent to browsers that connect later. The HUD shows when inputs last arrived.
 
 ## ZMQ Protocol
 
@@ -345,7 +360,7 @@ All settings via environment variables:
 | `GO2_VIZ_PLY` | — | Show this PLY file instead of the live map |
 | `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
 | `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
-| `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives visual parameters from robot-data publishers |
+| `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives human/robot inputs from robot-data publishers |
 
 ## Writing Custom Clients
 

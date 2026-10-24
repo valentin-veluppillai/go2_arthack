@@ -28,10 +28,10 @@ go2/
 │   └── __main__.py      # Entry point (stdio transport)
 ├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
 ├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map), PUB on port 5560
-├── go2_viz/             # Browser particle-swarm view of the map (python -m go2_viz, http://localhost:8090)
-│   ├── __main__.py      # FastAPI: go2_map (ZMQ) or a PLY file → WebSocket; visual params SUB on 5561
-│   ├── send.py          # CLI to send visual params (python -m go2_viz.send jitter=0.4 …)
-│   └── static/          # three.js swarm renderer (index.html, viz.js)
+├── go2_viz/             # Human–robodog co-creation view of the map (python -m go2_viz, http://localhost:8090)
+│   ├── __main__.py      # FastAPI: go2_map (ZMQ) or a PLY file + surface normals → WebSocket; inputs SUB on 5561
+│   ├── send.py          # CLI to send inputs (python -m go2_viz.send distance=0.6 velocity=0.8 …)
+│   └── static/          # three.js renderer: base + focus particle pools, input → visual mapping (viz.js)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
@@ -120,7 +120,7 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_VIZ_PLY` | — | Show this PLY file instead of the live map |
 | `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
 | `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
-| `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives visual parameters from robot-data publishers |
+| `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives human/robot inputs from robot-data publishers |
 
 ## ZMQ Protocol
 
