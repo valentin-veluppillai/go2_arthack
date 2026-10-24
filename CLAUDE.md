@@ -26,10 +26,12 @@ go2/
 │   └── __main__.py      # Entry point (stdio transport)
 ├── go2_yolo/            # YOLO detection on the camera stream (python -m go2_yolo)
 │   └── __main__.py      # SUB camera → YOLO → window + PUB on port 5557
+├── go2_follow/          # Keep a person in frame from YOLO boxes, SPACE = deadman (python -m go2_follow)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
 ├── requirements_yolo.txt
+├── requirements_follow.txt
 └── CLAUDE.md
 ```
 
@@ -56,6 +58,9 @@ python -m go2_mcp
 
 # YOLO detection (separate deps: pip install -r requirements_yolo.txt)
 python -m go2_yolo
+
+# Person follow (needs go2_yolo running; hold SPACE in its window to move)
+python -m go2_follow
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):

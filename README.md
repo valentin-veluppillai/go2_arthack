@@ -176,6 +176,24 @@ The model weights (`yolo11n.pt` by default) are downloaded on first run. Frames 
 | `camera_yolo` | Annotated JPEG bytes |
 | `detections` | JSON: `{"ts", "width", "height", "detections": [{"cls", "conf", "box": [x1, y1, x2, y2]}]}` |
 
+### 6. Person Follow
+
+`go2_follow` keeps a person in the camera frame using the YOLO detections. It picks the largest person and applies two simple rules:
+
+- **Turn:** box centre in the left / right 30 % of the image → turn left / right
+- **Distance:** box smaller than 5 % of the frame → walk forward; larger than 20 % → walk backward
+
+**Deadman switch:** the robot only moves while **SPACE is held** in the follower window. Releasing it, or the window losing focus, sends an immediate `stop`. If the follower crashes, the bridge's 250 ms movement timeout stops the robot.
+
+```bash
+pip install -r requirements_follow.txt
+python go2_client/cli_client.py action stand_up    # terminal 1, with the bridge running
+GO2_YOLO_SHOW=0 python -m go2_yolo                 # terminal 2
+python -m go2_follow                               # terminal 3: hold SPACE to follow, q / Esc to quit
+```
+
+The window shows the annotated camera feed, the turn zones (yellow lines) and the current command. Obstacle avoidance stays active if it is enabled in the bridge.
+
 ## ZMQ Protocol
 
 ### Commands (REQ/REP — port 5555)
@@ -254,6 +272,13 @@ All settings via environment variables:
 | `GO2_YOLO_CONF` | `0.4` | Detection confidence threshold |
 | `GO2_YOLO_DEVICE` | auto | Inference device (`cpu`, `mps`, `0`, …) |
 | `GO2_YOLO_SHOW` | `1` | Show the annotated feed in a window |
+| `GO2_YOLO_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_yolo` (for `go2_follow`) |
+| `GO2_FOLLOW_EDGE` | `0.3` | Turn when the person's centre is within this fraction of the left/right edge |
+| `GO2_FOLLOW_AREA_FAR` | `0.05` | Walk forward when the person box is smaller than this fraction of the frame |
+| `GO2_FOLLOW_AREA_NEAR` | `0.20` | Walk backward when the person box is larger than this fraction of the frame |
+| `GO2_FOLLOW_VX` | `0.3` | Forward/backward speed (m/s) |
+| `GO2_FOLLOW_VYAW` | `0.6` | Turn speed (rad/s) |
+| `GO2_FOLLOW_CONF` | `0.5` | Minimum confidence for a person detection |
 
 ## Writing Custom Clients
 
