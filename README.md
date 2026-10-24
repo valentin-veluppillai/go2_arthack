@@ -213,6 +213,24 @@ Open http://localhost:8090. The base look is calm and low-contrast: 4 000 crisp 
 
 The server sends at most 80 000 points to the browser (`GO2_VIZ_MAX_POINTS`), thinned evenly so consecutive maps stay similar.
 
+**Driving the look from robot data.** `go2_viz` binds a ZMQ SUB socket on port 5561 (`GO2_VIZ_PARAM_PORT`). Any number of processes can connect a PUB socket to it and send `[b"viz", json]` with any subset of these parameters; browsers ease into new numbers over about half a second, so noisy sensor data doesn't flicker:
+
+| Key | Range | Effect |
+|-----|-------|--------|
+| `particles` | 1 000 – 60 000 | Number of particles (density); added particles fade in on the map |
+| `paintColor` | `"#rrggbb"` or `"height"` | Colour of particles in the robot's field of view |
+| `jitter` | 0 – 1 | Erratic twitching in place |
+| `noise` | 0 – 5 | Flow field strength |
+| `markerChance` | 0 – 1 | Chance that a particle is drawn as a marker |
+
+```python
+pub = zmq.Context().socket(zmq.PUB)
+pub.connect("tcp://localhost:5561")
+pub.send_multipart([b"viz", json.dumps({"jitter": 0.4, "paintColor": "#ff8c1a"}).encode()])
+```
+
+For testing from the shell: `python -m go2_viz.send particles=12000 jitter=0.6 paintColor=#ff8c1a`. Unknown keys are ignored (and logged); the last values are also sent to browsers that connect later. The HUD shows when robot parameters last arrived.
+
 ## ZMQ Protocol
 
 ### Commands (REQ/REP — port 5555)
@@ -324,6 +342,7 @@ All settings via environment variables:
 | `GO2_VIZ_PLY` | — | Show this PLY file instead of the live map |
 | `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
 | `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
+| `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives visual parameters from robot-data publishers |
 
 ## Writing Custom Clients
 

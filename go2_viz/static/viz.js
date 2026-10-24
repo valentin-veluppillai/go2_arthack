@@ -51,10 +51,43 @@ const params = {
   fov: 90,            // robot field of view, full cone angle (deg)
   fovRange: 4,        // m
   desaturate: 3,      // s for a particle to lose its colour after leaving the field of view
+  paintMode: "height", // how particles in the field of view are painted: "height" colours or one "color"
+  paintColor: "#ff8c1a",
 };
 
 const BACKGROUND = 0x1a1b1e;
 const BG = new THREE.Color(BACKGROUND); // linear RGB, same space as the vertex colours
+const paintRGB = new THREE.Color(params.paintColor);
+
+// Parameters driven by robot data arrive over the WebSocket (from go2_viz's ZMQ port 5561).
+// Numbers ease towards the new value so noisy sensor data doesn't flicker.
+const REMOTE_EASE = 0.5; // s, time constant
+const REMOTE_RANGES = { particles: [1000, MAX_PARTICLES], jitter: [0, 1], noise: [0, 5], markerChance: [0, 1] };
+const remoteTargets = {};
+let remoteUpdated = 0;   // performance.now() of the last remote update, 0 = never
+
+function applyRemoteParams(update) {
+  for (const [key, value] of Object.entries(update)) {
+    if (key === "paintColor") {
+      if (value === "height") params.paintMode = "height";
+      else { params.paintMode = "color"; params.paintColor = value; paintRGB.set(value); }
+    } else if (key in REMOTE_RANGES && Number.isFinite(value)) {
+      const [lo, hi] = REMOTE_RANGES[key];
+      remoteTargets[key] = Math.min(Math.max(value, lo), hi);
+    }
+  }
+  remoteUpdated = performance.now();
+}
+
+function easeRemoteParams(dt) {
+  const k = 1 - Math.exp(-dt / REMOTE_EASE);
+  for (const [key, target] of Object.entries(remoteTargets)) {
+    const [lo, hi] = REMOTE_RANGES[key];
+    params[key] += (target - params[key]) * k;
+    if (Math.abs(target - params[key]) < (hi - lo) * 1e-4) { params[key] = target; delete remoteTargets[key]; }
+    if (key === "particles") params[key] = Math.round(params[key]);
+  }
+}
 
 // ── renderer, camera ─────────────────────────────────────────────
 
@@ -416,6 +449,7 @@ function connect() {
   ws.onopen = () => { linkState = "live"; };
   ws.onclose = () => { linkState = "off"; setTimeout(connect, 2000); };
   ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") { applyRemoteParams(JSON.parse(ev.data).params || {}); return; }
     const view = new DataView(ev.data);
     const headerLen = view.getUint32(0, true);
     const header = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 4, headerLen)));
@@ -428,10 +462,14 @@ setInterval(() => ws && ws.readyState === WebSocket.OPEN && ws.send("ping"), 100
 
 // ── simulation ───────────────────────────────────────────────────
 
+let activeCount = 0; // particles drawn last frame; newly added ones are respawned onto the map
+
 function step(dt, time) {
   const n = Math.min(params.particles, MAX_PARTICLES);
   geometry.setDrawRange(0, targetCount ? n : 0);
   if (!targetCount) return;
+  for (let i = activeCount; i < n; i++) respawn(i, pickTarget());
+  activeCount = n;
 
   const s = params.noiseScale, t = time * params.flowSpeed;
   const keep = Math.pow(params.damping, dt * 60);
@@ -502,10 +540,11 @@ function step(dt, time) {
       // narrow band of mid grays: slightly lighter higher up and when moving
       const h = (targetColors[q] + targetColors[q + 1] + targetColors[q + 2]) / 3;
       const g = 0.42 + 0.08 * h + Math.min(speed * 0.15, 0.06);
-      // seen by the robot: blend from gray to the height colour
-      colors[p] = g + (targetColors[q] * 0.9 - g) * sat;
-      colors[p + 1] = g + (targetColors[q + 1] * 0.9 - g) * sat;
-      colors[p + 2] = g + (targetColors[q + 2] * 0.9 - g) * sat;
+      // seen by the robot: blend from gray to the paint (height colour or a fixed colour)
+      const byHeight = params.paintMode === "height";
+      colors[p] = g + ((byHeight ? targetColors[q] * 0.9 : paintRGB.r) - g) * sat;
+      colors[p + 1] = g + ((byHeight ? targetColors[q + 1] * 0.9 : paintRGB.g) - g) * sat;
+      colors[p + 2] = g + ((byHeight ? targetColors[q + 2] * 0.9 : paintRGB.b) - g) * sat;
     } else if (params.colorMode === "speed") {
       heightColor(Math.min(speed / 1.5, 1), colors, p);
     } else {
@@ -552,6 +591,8 @@ robotFolder.add(params, "showFov").name("show field of view").onChange((v) => { 
 robotFolder.add(params, "fov", 10, 170, 1).name("field of view (°)").onChange(buildFovCone);
 robotFolder.add(params, "fovRange", 0.5, 10, 0.1).name("view range (m)").onChange(buildFovCone);
 robotFolder.add(params, "desaturate", 0.2, 10, 0.1).name("desaturate (s)");
+robotFolder.add(params, "paintMode", ["height", "color"]).name("paint");
+robotFolder.addColor(params, "paintColor").name("paint colour").onChange((v) => paintRGB.set(v));
 const cam = gui.addFolder("Camera");
 cam.add(params, "autoRotate");
 cam.add(params, "rotateSpeed", -3, 3, 0.1);
@@ -582,7 +623,7 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-const hud = Object.fromEntries(["source", "link", "points", "updates", "age", "fps"].map((id) => [id, document.getElementById(id)]));
+const hud = Object.fromEntries(["source", "link", "points", "updates", "age", "remote", "fps"].map((id) => [id, document.getElementById(id)]));
 let frames = 0, fpsTime = performance.now();
 
 function updateHud(now) {
@@ -597,6 +638,11 @@ function updateHud(now) {
   hud.age.textContent = age === null ? "–" : `${age.toFixed(1)} s ago`;
   hud.link.textContent = linkState === "live" ? (age !== null && age > 5 ? "connected, idle" : "live") : "reconnecting";
   hud.link.className = linkState === "live" ? (age !== null && age > 5 ? "stale" : "live") : "off";
+  hud.remote.textContent = remoteUpdated ? `${((now - remoteUpdated) / 1000).toFixed(1)} s ago` : "–";
+  // keep the panel in sync while robot data is moving the sliders
+  if (remoteUpdated && now - remoteUpdated < REMOTE_EASE * 10 * 1000) {
+    gui.controllersRecursive().forEach((c) => c.updateDisplay());
+  }
 }
 
 // ── loop ─────────────────────────────────────────────────────────
@@ -605,6 +651,7 @@ const clock = new THREE.Clock();
 
 function frame() {
   const dt = Math.min(clock.getDelta(), 1 / 20);
+  easeRemoteParams(dt);
   step(dt, clock.elapsedTime);
   robot.position.lerp(robotTarget, 1 - Math.exp(-dt * 3));
   robot.quaternion.slerp(robotQuatTarget, 1 - Math.exp(-dt * 3));
