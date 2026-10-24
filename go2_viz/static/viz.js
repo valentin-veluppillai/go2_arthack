@@ -22,7 +22,6 @@ const FADE_IN = 2.0;  // s, respawned particles fade in from the background
 const JITTER_RANGE = 0.06; // m, largest twitch offset at jitter = 1
 const JITTER_RATE = 0.35;  // chance per 1/60 s that a particle twitches to a new offset
 const SATURATE = 0.4;      // s to reach full colour inside the field of view
-const SHAPE_RATE = 6;      // vertex-count changes per second at roughness 1
 const HEAD_OFFSET = new THREE.Vector3(0.3, 0.1, 0); // robot head in its own frame (three.js axes: x forward, y up)
 // map frame (z up) → three.js frame (y up): -90° about x
 const MAP_TO_THREE = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
@@ -40,7 +39,6 @@ const params = {
   floorShare: 0.15,   // share of particles on the floor; the rest go to walls and objects
   size: 0.05,
   opacity: 0.55,
-  roughness: 0,       // particle shape: 0 = circle, 1 = low-n polygon changing its vertex count
   ceiling: 1.8,       // hide map points this far above the floor (m)
   colorMode: "gray",
   autoRotate: true,
@@ -83,80 +81,26 @@ const saturation = new Float32Array(MAX_PARTICLES);   // 0 = gray, 1 = full colo
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute("position", new THREE.BufferAttribute(drawn, 3).setUsage(THREE.DynamicDrawUsage));
 geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
-// per-particle random seed, so every particle gets its own spikes and splinters
-geometry.setAttribute("seed", new THREE.BufferAttribute(Float32Array.from({ length: MAX_PARTICLES }, Math.random), 1));
 geometry.setDrawRange(0, 0);
 
-// Point sprites drawn procedurally with crisp edges: at roughness 0 a circle, towards 1
-// a polygon with 3–6 sharp corners whose vertex count keeps changing, faster the
-// rougher it is.
-const material = new THREE.ShaderMaterial({
-  transparent: true,
-  depthWrite: false,
-  uniforms: {
-    size: { value: params.size },
-    scale: { value: 1 },          // half the drawing buffer height, for size attenuation
-    opacity: { value: params.opacity },
-    roughness: { value: params.roughness },
-    time: { value: 0 },
-  },
-  vertexShader: /* glsl */ `
-    attribute vec3 color;
-    attribute float seed;
-    uniform float size;
-    uniform float scale;
-    varying vec3 vColor;
-    varying float vSeed;
-    void main() {
-      vColor = color;
-      vSeed = seed;
-      vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = size * scale / -mv.z;
-      gl_Position = projectionMatrix * mv;
-    }`,
-  fragmentShader: /* glsl */ `
-    uniform float opacity;
-    uniform float roughness;
-    uniform float time;
-    varying vec3 vColor;
-    varying float vSeed;
+function discTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.35, "rgba(255,255,255,0.6)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
 
-    float hash(float x) { return fract(sin(x * 127.1) * 43758.5453); }
-
-    // signed distance to a regular n-gon with inradius r and rotation rot (sharp corners)
-    float sdPolygon(vec2 p, float n, float r, float rot) {
-      float half_ = 3.14159265 / n;
-      float a = atan(p.y, p.x) + rot;
-      float b = mod(a + half_, 2.0 * half_) - half_;
-      return length(p) * cos(b) - r;
-    }
-
-    void main() {
-      vec2 uv = gl_PointCoord * 2.0 - 1.0;
-
-      // vertex count: 3–6, re-drawn per particle at a rate that grows with roughness
-      float phase = floor(time * roughness * ${SHAPE_RATE.toFixed(1)} + vSeed * 17.0);
-      float n = 3.0 + floor(hash(vSeed * 91.7 + phase) * 4.0);
-      float rot = 6.2831853 * hash(vSeed * 13.3 + phase * 0.37);
-
-      // roughness blends a circle into the polygon; the polygon's corners touch the circle
-      float circle = length(uv) - 0.9;
-      float polygon = sdPolygon(uv, n, 0.9 * cos(3.14159265 / n), rot);
-      float d = mix(circle, polygon, roughness);
-
-      float aa = fwidth(d);  // one-pixel edge, no blur
-      float alpha = 1.0 - smoothstep(-aa, aa, d);
-      if (alpha < 0.01) discard;
-      gl_FragColor = vec4(vColor, alpha * opacity);
-      #include <colorspace_fragment>
-    }`,
+const material = new THREE.PointsMaterial({
+  size: params.size, map: discTexture(), vertexColors: true, transparent: true,
+  opacity: params.opacity, depthWrite: false, sizeAttenuation: true,
 });
 scene.add(new THREE.Points(geometry, material));
-
-function updatePointScale() {
-  material.uniforms.scale.value = renderer.getDrawingBufferSize(new THREE.Vector2()).y / 2;
-}
-updatePointScale();
 
 const robot = new THREE.Group();
 robot.add(new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), new THREE.MeshBasicMaterial({ color: 0x9a9da3 })));
@@ -464,9 +408,8 @@ swarm.add(params, "wander", 0, 0.3, 0.005);
 swarm.add(params, "jitter", 0, 1, 0.01);
 swarm.add(params, "floorShare", 0, 1, 0.01).name("floor share").onChange(() => scatterParticles(0, MAX_PARTICLES));
 const look = gui.addFolder("Look");
-look.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.uniforms.size.value = v; });
-look.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.uniforms.opacity.value = v; });
-look.add(params, "roughness", 0, 1, 0.01).onChange((v) => { material.uniforms.roughness.value = v; });
+look.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.size = v; });
+look.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.opacity = v; });
 look.add(params, "colorMode", ["gray", "height", "speed", "white"]);
 look.add(params, "ceiling", 0.3, 5, 0.1).name("ceiling (m)").onChange(rebuildTargets);
 const robotFolder = gui.addFolder("Robot");
@@ -529,7 +472,6 @@ const clock = new THREE.Clock();
 function frame() {
   const dt = Math.min(clock.getDelta(), 1 / 20);
   step(dt, clock.elapsedTime);
-  material.uniforms.time.value = clock.elapsedTime;
   robot.position.lerp(robotTarget, 1 - Math.exp(-dt * 3));
   robot.quaternion.slerp(robotQuatTarget, 1 - Math.exp(-dt * 3));
   controls.autoRotate = params.autoRotate;
@@ -549,5 +491,4 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  updatePointScale();
 });
