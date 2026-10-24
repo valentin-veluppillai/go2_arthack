@@ -88,7 +88,7 @@ const markerTile = new Float32Array(MAX_PARTICLES).fill(-1);
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute("position", new THREE.BufferAttribute(drawn, 3).setUsage(THREE.DynamicDrawUsage));
 geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
-// atlas tile per particle: -1 = soft disc, otherwise 2 × marker index (+1 = outline only)
+// atlas tile per particle: -1 = plain circle, otherwise 2 × marker index (+1 = outline only)
 geometry.setAttribute("tile", new THREE.BufferAttribute(markerTile, 1).setUsage(THREE.DynamicDrawUsage));
 geometry.setDrawRange(0, 0);
 
@@ -171,6 +171,7 @@ const material = new THREE.ShaderMaterial({
   uniforms: {
     size: { value: params.size },
     scale: { value: 1 },  // half the drawing buffer height, for size attenuation like PointsMaterial
+    minSize: { value: 2 },  // smallest point in device pixels, so far-away dots stay crisp instead of smearing
     opacity: { value: params.opacity },
     atlas: { value: markerAtlas() },
     grid: { value: new THREE.Vector2(ATLAS_COLS, ATLAS_ROWS) },
@@ -180,13 +181,14 @@ const material = new THREE.ShaderMaterial({
     attribute float tile;
     uniform float size;
     uniform float scale;
+    uniform float minSize;
     varying vec3 vColor;
     varying float vTile;
     void main() {
       vColor = color;
       vTile = tile;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = size * scale / -mv.z;
+      gl_PointSize = max(size * scale / -mv.z, minSize);
       gl_Position = projectionMatrix * mv;
     }`,
   fragmentShader: /* glsl */ `
@@ -198,9 +200,10 @@ const material = new THREE.ShaderMaterial({
     void main() {
       float alpha;
       if (vTile < 0.0) {
-        // the original soft disc: alpha 1 → 0.6 at 35 % radius → 0 at the edge
+        // crisp filled circle; the edge is smoothed over one pixel only, no blur
         float d = length(gl_PointCoord * 2.0 - 1.0);
-        alpha = d < 0.35 ? mix(1.0, 0.6, d / 0.35) : mix(0.6, 0.0, clamp((d - 0.35) / 0.65, 0.0, 1.0));
+        float aa = fwidth(d);
+        alpha = 1.0 - smoothstep(0.8 - aa, 0.8, d);
       } else {
         float col = mod(vTile, grid.x), row = floor(vTile / grid.x);
         vec2 uv = vec2((col + gl_PointCoord.x) / grid.x, 1.0 - (row + gl_PointCoord.y) / grid.y);
@@ -215,6 +218,7 @@ scene.add(new THREE.Points(geometry, material));
 
 function updatePointScale() {
   material.uniforms.scale.value = renderer.getDrawingBufferSize(new THREE.Vector2()).y / 2;
+  material.uniforms.minSize.value = 2 * renderer.getPixelRatio();
 }
 updatePointScale();
 
