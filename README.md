@@ -287,19 +287,21 @@ pub.send_multipart([b"viz", json.dumps({"distance": 0.8, "velocity": 0.6}).encod
 
 For testing from the shell: `python -m go2_viz.send distance=0.6 velocity=0.8 entropy=0.3 confidence=0.9 scale=0.7`. Unknown keys are ignored (and logged); the last values are also sent to browsers that connect later. The HUD shows when inputs last arrived.
 
-**Live inputs from the camera.** `python -m go2_viz.feed` turns `go2_yolo`'s pose detections into these inputs and publishes them about 10 times per second. It follows the largest confident person:
+**Live inputs from the camera and LiDAR.** `python -m go2_viz.feed` turns `go2_yolo`'s pose detections and the bridge's SLAM scans into these inputs and publishes them about 10 times per second. It follows the largest confident person:
 
 | Input | Computed from |
 |-------|---------------|
 | `humanBearing` | Offset of the box centre from the image centre, through the camera's horizontal field of view (`GO2_FEED_HFOV`) |
-| `distance` | Pinhole estimate from the torso length (shoulders → hips, `GO2_FEED_TORSO`) and the box height (`GO2_FEED_PERSON_H`), the nearer of the two |
+| `distance` | **LiDAR:** the nearest cluster of scan points in the person's direction (middle half of the box), at least 0.5 m tall, measured horizontally from the body centre. **Fallback** when there are no scans or no such cluster: pinhole estimate from the torso length (shoulders → hips, `GO2_FEED_TORSO`) and the box height (`GO2_FEED_PERSON_H`), the nearer of the two |
 | `scale` | Share of the frame the box covers, 1 at `GO2_FEED_SCALE_FULL` |
 | `confidence` | Mean keypoint confidence |
 | `velocity` | Mean keypoint speed in box heights per second, minus keypoint jitter, 1 at `GO2_FEED_VEL_FULL` |
 | `entropy` | Normalised Shannon entropy of the velocity over the last `GO2_FEED_ENTROPY_S` seconds: 0 when movement is steady, 1 when erratic |
 | `trackHuman` | `true` while a person is seen; `headYaw` / `headPitch` stay 0, as the Go2 has no separate head |
 
-Without a person for `GO2_FEED_LOST_S` the inputs go back to neutral (5 m, no movement, no confidence, scale 0, head straight ahead). The robot turning moves the whole image, so it counts as human movement. The distance is a rough estimate: calibrate `GO2_FEED_HFOV` and the body sizes for your camera and people.
+Without a person for `GO2_FEED_LOST_S` the inputs go back to neutral (5 m, no movement, no confidence, scale 0, head straight ahead). The robot turning moves the whole image, so it counts as human movement.
+
+The LiDAR distance uses the SLAM stream (port 5559): uslam's world-frame scans from the last 0.5 s (`GO2_FEED_LIDAR_WINDOW_S`, the L1 is sparse) are moved into the body frame with uslam's own pose, so the frames always match. uslam only publishes while mapping, which `go2_map` starts. Points between 0.15 m above the floor and head height are searched, and clusters count distinct 5 cm voxels, so a single stray return repeated in every scan doesn't win. An object between the robot and the person (a chair, a table) is measured instead of the person. The log line shows once per second whether the distance came from `lidar` or `camera`; the camera estimate depends on `GO2_FEED_HFOV` and the body sizes, so calibrate those for the fallback.
 
 ```bash
 python -m go2_bridge          # terminal 1 (with GO2_NETWORK_INTERFACE set)
@@ -443,6 +445,9 @@ All settings via environment variables:
 | `GO2_FEED_VEL_FULL` | `0.4` | Keypoint speed (box heights/s) that gives velocity 1 |
 | `GO2_FEED_ENTROPY_S` | `3` | Window for the entropy (s) |
 | `GO2_FEED_LOST_S` | `1.0` | No person for this long → neutral inputs |
+| `GO2_FEED_LIDAR` | `1` | Measure the distance from the SLAM scans (`0` = camera estimate only) |
+| `GO2_FEED_LIDAR_WINDOW_S` | `0.5` | SLAM scans merged for the distance (s) |
+| `GO2_FEED_LIDAR_MIN_POINTS` | `3` | Smallest point cluster (distinct 5 cm voxels) taken as the person |
 
 ## Writing Custom Clients
 

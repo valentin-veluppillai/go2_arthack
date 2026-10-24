@@ -1,12 +1,16 @@
 """Robot data → go2_viz inputs: python -m go2_viz.feed
 
-Reads go2_yolo's pose detections (port 5557), turns the most prominent person
-into the human/robot inputs of the co-creation spec and publishes them to
-go2_viz (port 5561) about 10 times per second:
+Reads go2_yolo's pose detections (port 5557) and the bridge's SLAM stream
+(port 5559), turns the most prominent person into the human/robot inputs of
+the co-creation spec and publishes them to go2_viz (port 5561) about 10 times
+per second:
 
     humanBearing  box centre's offset from the image centre, through the camera's field of view
-    distance      pinhole estimate from the torso length (shoulders → hips) and the box height,
-                  the nearer of the two (both err on the far side when the person is cut off or bends)
+    distance      LiDAR: the nearest cluster of scan points in the person's direction (the middle
+                  half of the box, as seen from the camera), measured from the body centre.
+                  Fallback without LiDAR points: pinhole estimate from the torso length
+                  (shoulders → hips) and the box height, the nearer of the two (both err on the
+                  far side when the person is cut off or bends)
     scale         share of the frame the box covers, 1 at GO2_FEED_SCALE_FULL
     confidence    mean keypoint confidence
     velocity      mean keypoint speed in box heights per second, minus jitter, 1 at GO2_FEED_VEL_FULL
@@ -17,6 +21,10 @@ go2_viz (port 5561) about 10 times per second:
 Without a person for GO2_FEED_LOST_S the inputs ease back to neutral
 (distance 5 m, no movement, no confidence, scale 0, head straight ahead).
 Camera motion (the robot turning) shows up as human movement.
+
+The SLAM scans are in the uslam world frame and are moved into the body frame
+with uslam's own pose, so they only arrive while uslam is mapping or
+localized (python -m go2_map starts mapping).
 """
 
 from __future__ import annotations
@@ -35,6 +43,8 @@ YOLO_HOST = os.getenv("GO2_YOLO_HOST", os.getenv("GO2_BRIDGE_HOST", "localhost")
 YOLO_PUB_PORT = int(os.getenv("GO2_YOLO_PUB_PORT", "5557"))
 VIZ_HOST = os.getenv("GO2_VIZ_PARAM_HOST", "localhost")
 VIZ_PARAM_PORT = int(os.getenv("GO2_VIZ_PARAM_PORT", "5561"))
+BRIDGE_HOST = os.getenv("GO2_BRIDGE_HOST", "localhost")
+SLAM_PORT = int(os.getenv("GO2_ZMQ_SLAM_PORT", "5559"))
 
 FEED_HZ = 10
 FEED_HFOV = float(os.getenv("GO2_FEED_HFOV", "120"))  # horizontal field of view of the front camera (°)
@@ -47,6 +57,15 @@ FEED_VEL_FULL = float(os.getenv("GO2_FEED_VEL_FULL", "0.4"))  # box heights/s fo
 FEED_VEL_NOISE = 0.05  # box heights/s of keypoint jitter on a person standing still
 FEED_ENTROPY_S = float(os.getenv("GO2_FEED_ENTROPY_S", "3"))  # entropy window (s)
 FEED_LOST_S = float(os.getenv("GO2_FEED_LOST_S", "1.0"))  # no person for this long → neutral
+FEED_LIDAR = os.getenv("GO2_FEED_LIDAR", "1") == "1"  # distance from the SLAM scans when possible
+FEED_LIDAR_WINDOW_S = float(os.getenv("GO2_FEED_LIDAR_WINDOW_S", "0.5"))  # scans merged (the L1 is sparse)
+FEED_LIDAR_MIN_POINTS = int(os.getenv("GO2_FEED_LIDAR_MIN_POINTS", "3"))  # smallest cluster taken as the person
+LIDAR_CLUSTER_DEPTH = 0.4  # m, depth of a person's cluster along the ray
+LIDAR_MIN_HEIGHT = 0.5  # m, vertical extent a cluster needs to count as a person
+LIDAR_VOXEL = 0.05  # m; merged scans repeat static points, so clusters count distinct voxels
+LIDAR_BAND = (-0.15, 1.5)  # m, body-frame heights searched: above the floor (≈ -0.3), up to head height
+LIDAR_MIN_SECTOR = 3.0  # °, half-width of the searched sector at least
+CAMERA_POS = np.array([0.32715, 0.0, 0.04297])  # front camera in the body frame (URDF)
 ENTROPY_BINS = 8
 SMOOTH = 0.3  # share of a new velocity sample per update (keypoints are noisy)
 
@@ -62,6 +81,74 @@ def clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
 
 
+# sensor_msgs/PointField datatype → NumPy type
+_POINTFIELD_TYPES = {1: "i1", 2: "u1", 3: "i2", 4: "u2", 5: "i4", 6: "u4", 7: "f4", 8: "f8"}
+
+
+def cloud_to_xyz(meta: dict, data: bytes) -> np.ndarray:
+    """Decode a PointCloud2 buffer into an (N, 3) float32 array of finite x, y, z."""
+    fields = {f["name"]: f for f in meta["fields"]}
+    order = ">" if meta["is_bigendian"] else "<"
+    dtype = np.dtype({
+        "names": ["x", "y", "z"],
+        "formats": [order + _POINTFIELD_TYPES[fields[n]["datatype"]] for n in "xyz"],
+        "offsets": [fields[n]["offset"] for n in "xyz"],
+        "itemsize": meta["point_step"],
+    })
+    cloud = np.frombuffer(data, dtype=dtype, count=meta["width"] * meta["height"])
+    xyz = np.stack([cloud["x"], cloud["y"], cloud["z"]], axis=1).astype(np.float32)
+    return xyz[np.isfinite(xyz).all(axis=1)]
+
+
+def rotate(q, v: np.ndarray) -> np.ndarray:
+    """Rotate vectors v (..., 3) by quaternion q = [x, y, z, w]."""
+    u, w = np.asarray(q[:3]), q[3]
+    return v + 2 * w * np.cross(u, v) + 2 * np.cross(u, np.cross(u, v))
+
+
+class LidarRange:
+    """Recent SLAM scans in the world frame plus the latest pose; measures the range in a direction."""
+
+    def __init__(self) -> None:
+        self.scans: collections.deque[tuple[float, np.ndarray]] = collections.deque()  # (time, world xyz)
+        self.odom: dict | None = None
+
+    def add_cloud(self, meta: dict, data: bytes) -> None:
+        now = time.monotonic()
+        self.scans.append((now, cloud_to_xyz(meta, data)))
+        while self.scans and self.scans[0][0] < now - FEED_LIDAR_WINDOW_S:
+            self.scans.popleft()
+
+    def body_points(self) -> np.ndarray:
+        """Recent scan points in the body frame (x forward, y left, z up)."""
+        if self.odom is None or not self.scans or self.scans[-1][0] < time.monotonic() - FEED_LIDAR_WINDOW_S:
+            return np.empty((0, 3))
+        world = np.concatenate([pts for _, pts in self.scans]).astype(float)
+        qx, qy, qz, qw = self.odom["orientation"]
+        return rotate([-qx, -qy, -qz, qw], world - np.asarray(self.odom["position"]))
+
+    def distance(self, left: float, right: float) -> float | None:
+        """Horizontal range of the nearest point cluster between two bearings (°, + = left, seen
+        from the camera), or None if there is none."""
+        pts = self.body_points()
+        pts = pts[(pts[:, 2] > LIDAR_BAND[0]) & (pts[:, 2] < LIDAR_BAND[1])]
+        rel = pts - CAMERA_POS
+        bearing = np.degrees(np.arctan2(rel[:, 1], rel[:, 0]))
+        pts = pts[(rel[:, 0] > 0) & (bearing >= right) & (bearing <= left)]
+        pts = np.unique(np.round(pts / LIDAR_VOXEL), axis=0) * LIDAR_VOXEL
+        r = np.hypot(pts[:, 0], pts[:, 1])
+        order = np.argsort(r)
+        r, z = r[order], pts[order, 2]
+        ends = np.searchsorted(r, r + LIDAR_CLUSTER_DEPTH)
+        # nearest range with enough points behind it within a person's depth, spanning a person's
+        # height (skips stray returns and low clutter like the floor's edge)
+        for start in np.flatnonzero(ends - np.arange(len(r)) >= FEED_LIDAR_MIN_POINTS):
+            zs = z[start:ends[start]]
+            if zs.max() - zs.min() >= LIDAR_MIN_HEIGHT:
+                return float(np.median(r[start:ends[start]]))
+        return None
+
+
 def pick_person(msg: dict) -> dict | None:
     """Largest confident person box, or None."""
     people = [d for d in msg["detections"] if d["cls"] == "person" and d["conf"] >= FEED_CONF]
@@ -73,7 +160,9 @@ def pick_person(msg: dict) -> dict | None:
 class Feed:
     """Turns successive detections messages into go2_viz inputs."""
 
-    def __init__(self) -> None:
+    def __init__(self, lidar: LidarRange | None = None) -> None:
+        self.lidar = lidar
+        self.distance_source = "-"
         self.prev: tuple[float, np.ndarray] | None = None  # ts, keypoints of the last frame with a person
         self.velocity = 0.0
         self.history: collections.deque[tuple[float, float]] = collections.deque()  # (time, velocity)
@@ -89,8 +178,11 @@ class Feed:
         focal = (w / 2) / math.tan(math.radians(FEED_HFOV) / 2)  # px, square pixels assumed
         kpts = np.array(person.get("keypoints") or np.zeros((0, 3)), dtype=float).reshape(-1, 3)
 
+        def bearing(x: float) -> float:  # ° from the camera axis, + = left
+            return 0.0 - math.degrees(math.atan((x - w / 2) / focal))
+
         out = {"trackHuman": True, "headYaw": 0.0, "headPitch": 0.0}
-        out["humanBearing"] = 0.0 - math.degrees(math.atan(((x1 + x2) / 2 - w / 2) / focal))  # + = left
+        out["humanBearing"] = bearing((x1 + x2) / 2)
         out["scale"] = clamp((x2 - x1) * box_h / (w * h) / FEED_SCALE_FULL)
 
         estimates = [FEED_PERSON_H * focal / box_h]
@@ -98,7 +190,12 @@ class Feed:
             torso = np.linalg.norm(kpts[list(SHOULDERS), :2].mean(0) - kpts[list(HIPS), :2].mean(0))
             if torso > 1:
                 estimates.append(FEED_TORSO * focal / torso)
-        out["distance"] = clamp(min(estimates), 0.3, 5.0)
+        measured = None
+        if self.lidar is not None:
+            half = max((bearing(x1) - bearing(x2)) / 4, LIDAR_MIN_SECTOR)  # middle half of the box
+            measured = self.lidar.distance(out["humanBearing"] + half, out["humanBearing"] - half)
+        self.distance_source = "lidar" if measured is not None else "camera"
+        out["distance"] = clamp(measured if measured is not None else min(estimates), 0.3, 5.0)
 
         if len(kpts):
             out["confidence"] = clamp(float(kpts[:, 2].mean()))
@@ -142,8 +239,21 @@ def main() -> None:
     pub.connect(f"tcp://{VIZ_HOST}:{VIZ_PARAM_PORT}")
     log.info("Detections from tcp://%s:%d → inputs to tcp://%s:%d",
              YOLO_HOST, YOLO_PUB_PORT, VIZ_HOST, VIZ_PARAM_PORT)
+    poller = zmq.Poller()
+    poller.register(sub, zmq.POLLIN)
 
-    feed = Feed()
+    lidar = None
+    if FEED_LIDAR:
+        lidar = LidarRange()
+        slam = ctx.socket(zmq.SUB)
+        slam.setsockopt(zmq.RCVHWM, 10)
+        slam.connect(f"tcp://{BRIDGE_HOST}:{SLAM_PORT}")
+        slam.subscribe(b"slam_cloud")
+        slam.subscribe(b"slam_odom")
+        poller.register(slam, zmq.POLLIN)
+        log.info("LiDAR distance from SLAM scans on tcp://%s:%d", BRIDGE_HOST, SLAM_PORT)
+
+    feed = Feed(lidar)
     inputs: dict = {}
     t_seen = 0.0  # monotonic time of the last frame with a person
     t_log = 0.0
@@ -151,12 +261,19 @@ def main() -> None:
         while True:
             t_next = time.monotonic() + 1 / FEED_HZ
             update = None
-            # handle every detections message that arrived, so velocity sees each frame
-            while sub.poll(max(0.0, t_next - time.monotonic()) * 1000):
-                _topic, payload = sub.recv_multipart()
-                result = feed.update(json.loads(payload))
-                if result is not None:
-                    update, t_seen = result, time.monotonic()
+            # handle every message that arrived, so velocity sees each frame
+            while ready := dict(poller.poll(max(0.0, t_next - time.monotonic()) * 1000)):
+                if lidar is not None and slam in ready:
+                    topic, *frames = slam.recv_multipart()
+                    if topic == b"slam_cloud":
+                        lidar.add_cloud(json.loads(frames[0]), frames[1])
+                    else:
+                        lidar.odom = json.loads(frames[0])
+                if sub in ready:
+                    _topic, payload = sub.recv_multipart()
+                    result = feed.update(json.loads(payload))
+                    if result is not None:
+                        update, t_seen = result, time.monotonic()
             now = time.monotonic()
             if update is not None:
                 inputs = update
@@ -166,12 +283,15 @@ def main() -> None:
                 pub.send_multipart([b"viz", json.dumps(inputs).encode()])
             if now - t_log > 1.0:
                 t_log = now
-                log.info("%s", "  ".join(f"{k} {v:.2f}" if isinstance(v, float) else f"{k} {v}"
-                                         for k, v in inputs.items()))
+                log.info("%s  (distance from %s)", "  ".join(
+                    f"{k} {v:.2f}" if isinstance(v, float) else f"{k} {v}" for k, v in inputs.items()),
+                    feed.distance_source if inputs.get("trackHuman") else "-")
     except KeyboardInterrupt:
         pass
     finally:
         sub.close()
+        if lidar is not None:
+            slam.close()
         pub.close(linger=0)
         ctx.term()
 

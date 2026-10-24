@@ -33,7 +33,7 @@ go2/
 ├── go2_follow/          # Keep a person in frame from YOLO boxes, SPACE = deadman (python -m go2_follow)
 ├── go2_viz/             # Human–robodog co-creation view of the map (python -m go2_viz, http://localhost:8090)
 │   ├── __main__.py      # FastAPI: go2_map (ZMQ) or a PLY file + surface normals → WebSocket; inputs SUB on 5561
-│   ├── feed.py          # go2_yolo pose detections → viz inputs (python -m go2_viz.feed)
+│   ├── feed.py          # go2_yolo pose + SLAM scans (LiDAR distance) → viz inputs (python -m go2_viz.feed)
 │   ├── send.py          # CLI to send inputs (python -m go2_viz.send distance=0.6 velocity=0.8 …)
 │   └── static/          # three.js renderer: base + focus particle pools, input → visual mapping (viz.js)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
@@ -83,7 +83,7 @@ python -m go2_follow
 # Particle-swarm view of the map (deps: pip install -r requirements_viz.txt)
 python -m go2_viz
 
-# Live viz inputs from go2_yolo's pose detections (needs go2_yolo and go2_viz running)
+# Live viz inputs from go2_yolo's pose detections + LiDAR distance from the SLAM scans (needs go2_yolo, go2_viz; go2_map for mapping)
 python -m go2_viz.feed
 ```
 
@@ -142,6 +142,7 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_YOLO_MODEL` | `yolo26n-pose.pt` | YOLO weights; pose models add keypoints to the detections |
 | `GO2_FEED_HFOV` | `120` | Front camera horizontal FOV (°) used by `go2_viz.feed` for bearing/distance |
 | `GO2_FEED_VEL_FULL` | `0.4` | Keypoint speed (box heights/s) that maps to velocity 1 |
+| `GO2_FEED_LIDAR` | `1` | `go2_viz.feed` measures the human distance from the SLAM scans (falls back to the camera estimate) |
 
 ## ZMQ Protocol
 
