@@ -35,7 +35,8 @@ go2/
 │   ├── __main__.py      # FastAPI: go2_map (ZMQ) or a PLY file + surface normals → WebSocket; inputs SUB on 5561
 │   ├── feed.py          # go2_yolo pose + SLAM scans (LiDAR distance) → viz inputs (python -m go2_viz.feed)
 │   ├── send.py          # CLI to send inputs (python -m go2_viz.send distance=0.6 velocity=0.8 …)
-│   └── static/          # three.js renderer: base + focus particle pools, input → visual mapping (viz.js)
+│   ├── texture.py       # Human colour channel: blurred test pattern / panorama → per-point RGB
+│   └── static/          # three.js renderer: particle pools, input → visual mapping, dual-stream screen blend (viz.js)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
@@ -136,6 +137,8 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
 | `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
 | `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives human/robot inputs from robot-data publishers |
+| `GO2_VIZ_TEXTURE` | — | Human colour channel for offline tests: `pattern` or an equirectangular image |
+| `GO2_VIZ_BLUR` | `0.03` | Blur sigma of the human channel texture, fraction of its width |
 | `GO2_VIZ_PARAM_HOST` | `localhost` | Host running `go2_viz` (for `go2_viz.feed` / `go2_viz.send`) |
 | `GO2_YOLO_PUB_PORT` | `5557` | `go2_yolo` detections PUB port |
 | `GO2_YOLO_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_yolo` (for `go2_follow`, `go2_viz.feed`) |

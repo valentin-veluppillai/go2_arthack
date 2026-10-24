@@ -17,6 +17,9 @@ per second:
     entropy       normalised Shannon entropy of the velocity over the last few seconds:
                   0 = steady (still or moving evenly), 1 = erratic
     trackHuman    true while a person is seen; headYaw / headPitch stay 0 (the Go2 has no separate head)
+    boxLeft, boxRight, boxTop, boxBottom
+                  the person's bounding box as angles from the camera axis (°, + = left / up,
+                  camera assumed level); go2_viz shapes the human-channel vignette with it
 
 Without a person for GO2_FEED_LOST_S the inputs ease back to neutral
 (distance 5 m, no movement, no confidence, scale 0, head straight ahead).
@@ -181,8 +184,12 @@ class Feed:
         def bearing(x: float) -> float:  # ° from the camera axis, + = left
             return 0.0 - math.degrees(math.atan((x - w / 2) / focal))
 
+        def elevation(y: float) -> float:  # ° from the camera axis, + = up
+            return 0.0 - math.degrees(math.atan((y - h / 2) / focal))
+
         out = {"trackHuman": True, "headYaw": 0.0, "headPitch": 0.0}
         out["humanBearing"] = bearing((x1 + x2) / 2)
+        out.update(boxLeft=bearing(x1), boxRight=bearing(x2), boxTop=elevation(y1), boxBottom=elevation(y2))
         out["scale"] = clamp((x2 - x1) * box_h / (w * h) / FEED_SCALE_FULL)
 
         estimates = [FEED_PERSON_H * focal / box_h]

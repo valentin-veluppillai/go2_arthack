@@ -18,12 +18,23 @@ ZMQ PUB socket to tcp://<this host>:5561 and send [b"viz", json] with any of
     coneAngle     view cone angle, degrees (15–90)
     trackHuman    true = the head follows the human
     humanBearing  direction of the human relative to the body, degrees
+    boxLeft, boxRight, boxTop, boxBottom
+                  the human's bounding box as angles from the camera axis, degrees (+ = left / up);
+                  shapes the vignette of the human colour channel
 The browser maps these to the visual parameters; the latest values are
 forwarded to every browser, which eases into them.
 
+Human channel colours: with GO2_VIZ_TEXTURE ("pattern" for a built-in test
+panorama, or an image file) every map point gets an RGB colour from that
+panorama, wrapped around the middle of the map and blurred by GO2_VIZ_BLUR
+(a fraction of the image width). The browser screen-blends it with the robot's
+time-of-flight colour inside the view cone. Live photographic colour from the
+camera is not wired up yet.
+
 WebSocket messages: the map is binary (uint32 header length, JSON header,
 padding to a multiple of 4 bytes, then float32 x, y, z triples followed by
-float32 surface normals); input updates are text, {"params": {...}}.
+float32 surface normals, then uint8 r, g, b triples if the header has
+"rgb": true); input updates are text, {"params": {...}}.
 """
 
 from __future__ import annotations
@@ -45,6 +56,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import texture
+
 MAP_HOST = os.getenv("GO2_MAP_HOST", os.getenv("GO2_BRIDGE_HOST", "localhost"))
 MAP_PUB_PORT = int(os.getenv("GO2_MAP_PUB_PORT", "5560"))
 VIZ_PLY = os.getenv("GO2_VIZ_PLY", "")  # use this PLY file instead of the live map
@@ -52,8 +65,11 @@ VIZ_HOST = os.getenv("GO2_VIZ_HOST", "0.0.0.0")
 VIZ_PORT = int(os.getenv("GO2_VIZ_PORT", "8090"))
 VIZ_MAX_POINTS = int(os.getenv("GO2_VIZ_MAX_POINTS", "80000"))  # sent to the browser
 VIZ_PARAM_PORT = int(os.getenv("GO2_VIZ_PARAM_PORT", "5561"))  # SUB binds here; publishers connect
+VIZ_TEXTURE = os.getenv("GO2_VIZ_TEXTURE", "")  # human channel: "pattern" or an image file (panorama)
+VIZ_BLUR = float(os.getenv("GO2_VIZ_BLUR", "0.03"))  # blur sigma, fraction of the texture width
 REMOTE_PARAMS = {"distance", "velocity", "entropy", "confidence", "scale",
-                 "headYaw", "headPitch", "coneAngle", "trackHuman", "humanBearing"}
+                 "headYaw", "headPitch", "coneAngle", "trackHuman", "humanBearing",
+                 "boxLeft", "boxRight", "boxTop", "boxBottom"}
 NORMAL_NEIGHBOURS = 12
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -63,6 +79,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 clients: set[WebSocket] = set()
 latest: bytes | None = None  # last encoded map, sent to new clients
 remote_params: dict = {}  # merged parameter updates, sent to new clients
+panorama: np.ndarray | None = None  # blurred human-channel texture, loaded at startup
 
 _PLY_TYPES = {"char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1", "short": "i2", "int16": "i2",
               "ushort": "u2", "uint16": "u2", "int": "i4", "int32": "i4", "uint": "u4", "uint32": "u4",
@@ -110,10 +127,13 @@ def encode(points: np.ndarray, meta: dict) -> bytes:
         points = points[np.linspace(0, len(points) - 1, VIZ_MAX_POINTS).astype(int)]
     points = points.astype(np.float64)
     normals = estimate_normals(points)
-    header = json.dumps({**meta, "count": len(points)}).encode()
+    rgb = b""
+    if panorama is not None and len(points):
+        rgb = texture.panorama_colors(points, panorama, texture.panorama_centre(points)).tobytes()
+    header = json.dumps({**meta, "count": len(points), "rgb": bool(rgb)}).encode()
     pad = (-(4 + len(header))) % 4
     return (struct.pack("<I", len(header)) + header + b" " * pad
-            + points.astype("<f4").tobytes() + normals.astype("<f4").tobytes())
+            + points.astype("<f4").tobytes() + normals.astype("<f4").tobytes() + rgb)
 
 
 async def broadcast(message: bytes) -> None:
@@ -199,6 +219,11 @@ async def ply_source(path: str) -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    global panorama
+    if VIZ_TEXTURE:
+        image = texture.test_pattern() if VIZ_TEXTURE == "pattern" else texture.load_image(VIZ_TEXTURE)
+        panorama = texture.blur(image, VIZ_BLUR, wrap=True)
+        log.info("Human channel: %s, blurred by %.0f%% of its width", VIZ_TEXTURE, VIZ_BLUR * 100)
     source = asyncio.create_task(ply_source(VIZ_PLY) if VIZ_PLY else zmq_source())
     params = asyncio.create_task(param_source())
     yield

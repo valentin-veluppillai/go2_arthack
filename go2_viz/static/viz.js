@@ -16,6 +16,15 @@
 //   entropy    → dispersion of focus particles away from the surfaces
 //   confidence → saturation of the in-cone colouring (viridis, by distance)
 //   scale      → share of particles drawn as diamond/crosshair markers
+// Inside the cone two colour channels are screen-blended,
+//   final = 1 − (1 − wr·robot)(1 − wh·human),  wh = engagement, wr = 1 − wh
+// robot: time-of-flight false colour; human: the map point's photographic RGB
+// (from the server, a blurred test texture for now). Engagement rises with
+// proximity and gesture velocity, so the human channel dominates up close.
+// The human channel only shows where the human is: a soft vignette shaped by
+// the detected bounding box (angles seen from the front camera) and limited in
+// depth to around the human's distance. Without box inputs from go2_viz.feed
+// the box of the simulated human column is used.
 // Map coordinates are z-up; three.js is y-up.
 
 import * as THREE from "three";
@@ -38,6 +47,11 @@ const TEAR_CHANCE = 0.03;  // chance per 1/60 s that a particle tears at full te
 const MAX_DISPERSION = 0.5; // m, how far focus particles drift from the surface at entropy = 1
 const SATURATE = 0.4;      // s to reach full colour inside the field of view
 const HEAD_OFFSET = new THREE.Vector3(0.3, 0.1, 0); // robot head in its own frame (three.js axes: x forward, y up)
+const CAMERA_OFFSET = new THREE.Vector3(0.327, 0.043, 0); // front camera in the body frame (URDF), where box angles are seen from
+const VIGNETTE_EDGE = [0.7, 1.3];  // box-normalised radius where the human channel starts / finishes fading out
+const VIGNETTE_DEPTH = [0.4, 0.9]; // m from the human's distance where it starts / finishes fading out
+const BOX_STALE = 2;               // s without box inputs before the simulated human's box takes over
+const HUMAN_WIDTH = 0.5;           // m, width of the simulated human's box
 // map frame (z up) → three.js frame (y up): -90° about x
 const MAP_TO_THREE = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
 
@@ -54,14 +68,16 @@ const inputs = {
   headPitch: 0,      // head pitch (deg, + = up)
   coneAngle: 60,     // view cone, full angle (deg)
   trackHuman: false, // head follows the human
+  boxLeft: 0, boxRight: 0, boxTop: 0, boxBottom: 0, // human bounding box seen from the camera (deg, + = left / up)
 };
 const INPUT_RANGES = {
   distance: [0.3, 5], velocity: [0, 1], entropy: [0, 1], confidence: [0, 1], scale: [0, 1],
   humanBearing: [-180, 180], headYaw: [-180, 180], headPitch: [-60, 60], coneAngle: [15, 90],
+  boxLeft: [-90, 90], boxRight: [-90, 90], boxTop: [-90, 90], boxBottom: [-90, 90],
 };
 
 // visual parameters derived from the inputs every frame
-const derived = { jitter: 0, tear: 0, focusFactor: 1, dispersion: 0, saturation: 0, markerRatio: 0 };
+const derived = { jitter: 0, tear: 0, focusFactor: 1, dispersion: 0, saturation: 0, markerRatio: 0, engagement: 0 };
 
 function deriveFromInputs() {
   const d = inputs.distance;
@@ -71,6 +87,8 @@ function deriveFromInputs() {
   derived.dispersion = inputs.entropy;
   derived.saturation = inputs.confidence;
   derived.markerRatio = inputs.scale;
+  // either closeness (the jitter term: 1 at ≤1 m) or movement engages; together they saturate
+  derived.engagement = 1 - (1 - derived.jitter) * (1 - inputs.velocity);
 }
 
 // tuning: the swarm's own behaviour; base case is calm, low-contrast grayscale
@@ -92,6 +110,7 @@ const params = {
   colorMode: "gray",
   paintMode: "time of flight", // in-cone colour: viridis by distance from the head, height colours, or one colour
   paintColor: "#ff8c1a",
+  humanChannel: true, // screen-blend the human (photographic) channel into the cone paint
   fovRange: 4,        // m
   desaturate: 3,      // s for a particle to lose its colour after leaving the field of view
   showRobot: true,
@@ -109,6 +128,7 @@ const paintRGB = new THREE.Color(params.paintColor);
 const REMOTE_EASE = 0.5; // s, time constant
 const remoteTargets = {};
 let remoteUpdated = 0;   // performance.now() of the last remote update, 0 = never
+let boxUpdated = 0;      // performance.now() of the last bounding box update, 0 = never
 
 function applyRemoteInputs(update) {
   for (const [key, value] of Object.entries(update)) {
@@ -116,6 +136,7 @@ function applyRemoteInputs(update) {
     else if (key in INPUT_RANGES && Number.isFinite(value)) {
       const [lo, hi] = INPUT_RANGES[key];
       remoteTargets[key] = THREE.MathUtils.clamp(value, lo, hi);
+      if (key.startsWith("box")) boxUpdated = performance.now();
     }
   }
   remoteUpdated = performance.now();
@@ -389,13 +410,56 @@ function aimHead(dt) {
   headDir.set(1, 0, 0).applyQuaternion(headQuat);
 }
 
+// the human's box as centre and half-size angles (rad) seen from the camera: from go2_viz.feed
+// while it sends boxes, else the simulated human column's
+const box = { az: 0, el: 0, halfAz: 0.1, halfEl: 0.1, source: "sim" };
+const robotInverse = new THREE.Matrix4();
+
+function updateHumanBox() {
+  const rad = THREE.MathUtils.degToRad;
+  let left, right, top, bottom;
+  if (boxUpdated && performance.now() - boxUpdated < BOX_STALE * 1000) {
+    [left, right, top, bottom] = [rad(inputs.boxLeft), rad(inputs.boxRight), rad(inputs.boxTop), rad(inputs.boxBottom)];
+    box.source = "camera";
+  } else {
+    const c = robot.worldToLocal(human.position.clone()).sub(CAMERA_OFFSET);
+    const az = Math.atan2(-c.z, c.x), d = Math.hypot(c.x, c.z), half = Math.atan2(HUMAN_WIDTH / 2, d);
+    [left, right] = [az + half, az - half];
+    [top, bottom] = [Math.atan2(c.y + HUMAN_HEIGHT / 2, d), Math.atan2(c.y - HUMAN_HEIGHT / 2, d)];
+    box.source = "sim";
+  }
+  box.az = (left + right) / 2; box.halfAz = Math.max(Math.abs(left - right) / 2, rad(1));
+  box.el = (top + bottom) / 2; box.halfEl = Math.max(Math.abs(top - bottom) / 2, rad(1));
+  robotInverse.copy(robot.matrixWorld).invert();
+}
+
+// 0–1: how much a point (three.js world coords) lies where the human is
+function humanMask(x, y, z) {
+  const e = robotInverse.elements;
+  const lx = e[0] * x + e[4] * y + e[8] * z + e[12];
+  const ly = e[1] * x + e[5] * y + e[9] * z + e[13];
+  const lz = e[2] * x + e[6] * y + e[10] * z + e[14];
+  const depth = Math.abs(Math.hypot(lx, lz) - inputs.distance);
+  if (depth >= VIGNETTE_DEPTH[1]) return 0;
+  const cx = lx - CAMERA_OFFSET.x, cy = ly - CAMERA_OFFSET.y, cz = lz - CAMERA_OFFSET.z;
+  let daz = Math.atan2(-cz, cx) - box.az;
+  daz -= 2 * Math.PI * Math.round(daz / (2 * Math.PI)); // the simulated human can stand behind the robot
+  const u = daz / box.halfAz, v = (Math.atan2(cy, Math.hypot(cx, cz)) - box.el) / box.halfEl;
+  const r = Math.sqrt(Math.sqrt(u * u * u * u + v * v * v * v)); // rounded rectangle (superellipse) in angle space
+  return (1 - THREE.MathUtils.smoothstep(r, VIGNETTE_EDGE[0], VIGNETTE_EDGE[1]))
+       * (1 - THREE.MathUtils.smoothstep(depth, VIGNETTE_DEPTH[0], VIGNETTE_DEPTH[1]));
+}
+
 // ── map / targets ────────────────────────────────────────────────
 
 let rawMap = null;                   // last map as received: Float32Array x, y, z (z-up)
+let rawRGB = null;                   // and its human-channel colours, Uint8Array r, g, b (or null)
 let rawNormals = null;               // and its surface normals
 let targets = new Float32Array(0);   // filtered map in three.js coords (y-up)
 let targetNormals = new Float32Array(0);
 let targetColors = new Float32Array(0);
+let targetRGB = new Float32Array(0);  // human channel, 0–1
+let mapHasRGB = false;
 let targetCount = 0;
 let structureCount = 0;              // targets [0, structureCount) are above the floor, the rest is floor
 let targetCell = new Float64Array(0); // grid cell key of each target (exceeds int32)
@@ -444,6 +508,8 @@ function rebuildTargets() {
   targets = new Float32Array(keep.length * 3);
   targetNormals = new Float32Array(keep.length * 3);
   targetColors = new Float32Array(keep.length * 3);
+  targetRGB = new Float32Array(keep.length * 3);
+  mapHasRGB = !!rawRGB;
   keep.forEach((i, k) => {
     targets[k * 3] = rawMap[i * 3];             // x → x
     targets[k * 3 + 1] = rawMap[i * 3 + 2];     // z → y (up)
@@ -452,6 +518,7 @@ function rebuildTargets() {
     targetNormals[k * 3 + 1] = rawNormals[i * 3 + 2];
     targetNormals[k * 3 + 2] = -rawNormals[i * 3 + 1];
     ramp(PALETTE, (z[i] - floor) / Math.max(top - floor, 0.1), targetColors, k * 3);
+    if (rawRGB) for (let c = 0; c < 3; c++) targetRGB[k * 3 + c] = rawRGB[i * 3 + c] / 255;
   });
   const first = targetCount === 0;
   targetCount = keep.length;
@@ -567,9 +634,10 @@ function fitView() {
   camera.updateProjectionMatrix();
 }
 
-function onMap(header, xyz, normals) {
+function onMap(header, xyz, normals, rgb) {
   rawMap = xyz;
   rawNormals = normals;
+  rawRGB = rgb;
   rebuildTargets();
   if (!hasFitView && targetCount) { fitView(); hasFitView = true; }
   if (header.robot) {
@@ -608,7 +676,8 @@ function connect() {
     const header = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 4, headerLen)));
     const offset = 4 + headerLen + ((4 - ((4 + headerLen) % 4)) % 4);
     const n = header.count * 3;
-    onMap(header, new Float32Array(ev.data, offset, n), new Float32Array(ev.data, offset + n * 4, n));
+    onMap(header, new Float32Array(ev.data, offset, n), new Float32Array(ev.data, offset + n * 4, n),
+          header.rgb ? new Uint8Array(ev.data, offset + n * 8, n) : null);
   };
 }
 connect();
@@ -645,6 +714,10 @@ function step(dt, time) {
   const conf = derived.saturation;
   const tof = params.paintMode === "time of flight", byHeight = params.paintMode === "height";
   const paint = [0, 0, 0];
+  // dual stream: the human channel's weight, scaled per particle by the vignette around the human;
+  // the robot channel gets the rest, so the screen never blows out
+  const wh = params.humanChannel && mapHasRGB ? derived.engagement : 0;
+  if (wh > 0) updateHumanBox();
   visibleFocus = 0;
 
   for (let i = 0; i < MAX_PARTICLES; i++) {
@@ -729,6 +802,8 @@ function step(dt, time) {
         if (tof) ramp(VIRIDIS, Math.sqrt(d2) / params.fovRange, paint, 0);
         else if (byHeight) { paint[0] = targetColors[q] * 0.9; paint[1] = targetColors[q + 1] * 0.9; paint[2] = targetColors[q + 2] * 0.9; }
         else { paint[0] = paintRGB.r; paint[1] = paintRGB.g; paint[2] = paintRGB.b; }
+        const w = wh > 0 ? wh * humanMask(drawn[p], drawn[p + 1], drawn[p + 2]) : 0;
+        if (w > 0) for (let c = 0; c < 3; c++) paint[c] = 1 - (1 - (1 - w) * paint[c]) * (1 - w * targetRGB[q + c]);
         const lum = 0.2126 * paint[0] + 0.7152 * paint[1] + 0.0722 * paint[2];
         for (let c = 0; c < 3; c++) colors[p + c] = g + (lum + (paint[c] - lum) * conf - g) * sat;
       } else {
@@ -788,6 +863,7 @@ lookFolder.add(params, "colorMode", ["gray", "height", "speed", "white"]);
 lookFolder.add(params, "ceiling", 0.3, 5, 0.1).name("ceiling (m)").onChange(rebuildTargets);
 lookFolder.add(params, "paintMode", ["time of flight", "height", "color"]).name("cone paint");
 lookFolder.addColor(params, "paintColor").name("paint colour").onChange((v) => paintRGB.set(v));
+lookFolder.add(params, "humanChannel").name("human channel");
 lookFolder.add(params, "fovRange", 0.5, 10, 0.1).name("view range (m)");
 lookFolder.add(params, "desaturate", 0.2, 10, 0.1).name("desaturate (s)");
 const markerFolder = tuning.addFolder("Markers");
@@ -843,7 +919,7 @@ function updateHud(now) {
   hud.robotsrc.textContent = robotSource;
   hud.cone.textContent = coneList.length.toLocaleString();
   hud.focus.textContent = `${visibleFocus.toLocaleString()} (×${derived.focusFactor.toFixed(1)})`;
-  hud.mapping.textContent = `jitter ${derived.jitter.toFixed(2)}${derived.tear > 0 ? " tear" : ""} · disp ${derived.dispersion.toFixed(2)} · sat ${derived.saturation.toFixed(2)} · markers ${derived.markerRatio.toFixed(2)}`;
+  hud.mapping.textContent = `jitter ${derived.jitter.toFixed(2)}${derived.tear > 0 ? " tear" : ""} · disp ${derived.dispersion.toFixed(2)} · sat ${derived.saturation.toFixed(2)} · markers ${derived.markerRatio.toFixed(2)}${mapHasRGB ? ` · human ${derived.engagement.toFixed(2)} (${box.source} box)` : ""}`;
   hud.remote.textContent = remoteUpdated ? `${((now - remoteUpdated) / 1000).toFixed(1)} s ago` : "–";
   // keep the panel in sync while robot data is moving the sliders
   if (remoteUpdated && now - remoteUpdated < REMOTE_EASE * 10 * 1000) {

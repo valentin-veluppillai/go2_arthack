@@ -252,6 +252,7 @@ The window shows the annotated camera feed, the turn zones (yellow lines) and th
 | Posture **confidence** | 0 – 1 | **Saturation** of the in-cone colouring: monochrome at 0, full colour at 1 |
 | Perceived human **scale** | 0 – 1 | Share of particles drawn as **diamond / crosshair** markers instead of circles |
 | Head **yaw / pitch**, **cone angle** | °, 15 – 90° | **Zone of interest**: particles inside the cone take on a faked time-of-flight colour (viridis by distance from the head); outside they decay back to gray |
+| **Proximity** and **gesture velocity** (engagement), human **bounding box** | 0 – 1, ° | **Dual-stream colour** around the human: see below |
 
 How it works: a calm **base pool** of particles covers the whole room. A second **focus pool** only takes spots inside the view cone; its size is the number of map points in the cone × focus density × (1 + 14 · velocity), so the cone gets denser with movement whether it is narrow or wide. When the cone moves, focus particles whose spot drops out fade out and reappear inside the cone, so nothing flies through empty space. Surface normals for jitter and dispersion are computed on the server (PCA over each point's 12 nearest neighbours).
 
@@ -262,6 +263,18 @@ GO2_VIZ_PLY=go2_map_20261024_173512.ply python -m go2_viz   # from a saved map, 
 ```
 
 Open http://localhost:8090. The panel has the test controls from the spec: **Human** (distance, gesture velocity, posture confidence, detected scale, bearing) and **Robot & canvas** (head yaw/pitch, cone angle, head tracks human, entropy). A simulated human (a translucent column) stands at the given distance and bearing; with *head tracks human* the head turns towards it. Without a robot pose (e.g. a PLY file) a virtual robot stands in the middle of the map. The swarm's own behaviour (base particles, focus density, spring, flow drift, hops, size, opacity, colours, view range, desaturation time, marker changes, camera) is in the collapsed **Tuning** folder. The HUD shows the data source, robot source, points and focus particles in the cone, and the current mapping (jitter, dispersion, saturation, marker share). **Snapshot** saves the current frame as PNG, **Record** records the frame stream as WebM.
+
+**Dual-stream colour.** Inside the cone, where the human is, two colour channels are screen-blended: the robot channel (the time-of-flight false colour) and the human channel (photographic RGB of the map point):
+
+    C_final = 1 − (1 − w_r · C_robot) × (1 − w_h · C_human),   w_h = engagement × vignette,   w_r = 1 − w_h
+
+- **Engagement** = 1 − (1 − proximity)(1 − velocity), where proximity is the jitter term (1 at ≤ 1 m, 0 at ≥ 3 m). Either closeness or movement engages, so the human channel dominates up close; far and still it is pure robot colour. The weights sum to 1, so the blend never washes out to white.
+- **Vignette**: the human channel only shows where the human is. Its shape is the human's bounding box as angles seen from the front camera (`boxLeft`/`boxRight`/`boxTop`/`boxBottom` from `go2_viz.feed`), a rounded rectangle that fades out from 0.7 to 1.3 box half-sizes, limited in depth to ±0.4–0.9 m around the human's distance so the wall behind them stays robot-coloured. Without box inputs for 2 s the simulated human column's box is used. The HUD shows the engagement and which box is in use.
+- **Human channel source**: live photographic colour from the camera is not wired up yet. For offline tests, `GO2_VIZ_TEXTURE=pattern` wraps a built-in test panorama around the middle of the map (12 hue sectors around the horizon, checkered in brightness every 15° of elevation); `GO2_VIZ_TEXTURE=room.jpg` uses an equirectangular image instead (needs Pillow). The texture is blurred heavily (`GO2_VIZ_BLUR`, sigma as a fraction of its width, default 3 %) so small misalignments only shift soft gradients; the live camera is meant to go through the same blur. **Tuning → Look → human channel** turns the blend off.
+
+```bash
+GO2_VIZ_PLY=go2_map_20261024_175506.ply GO2_VIZ_TEXTURE=pattern python -m go2_viz
+```
 
 The server sends at most 80 000 points to the browser (`GO2_VIZ_MAX_POINTS`), thinned evenly so consecutive maps stay similar.
 
@@ -278,6 +291,7 @@ The server sends at most 80 000 points to the browser (`GO2_VIZ_MAX_POINTS`), th
 | `coneAngle` | 15 – 90 | View cone, full angle (°) |
 | `trackHuman` | `true` / `false` | Head follows the human |
 | `humanBearing` | ±180 | Direction of the human relative to the body (°) |
+| `boxLeft`, `boxRight`, `boxTop`, `boxBottom` | ±90 | The human's bounding box as angles from the front camera's axis (°, + = left / up); shapes the human-channel vignette |
 
 ```python
 pub = zmq.Context().socket(zmq.PUB)
@@ -298,6 +312,7 @@ For testing from the shell: `python -m go2_viz.send distance=0.6 velocity=0.8 en
 | `velocity` | Mean keypoint speed in box heights per second, minus keypoint jitter, 1 at `GO2_FEED_VEL_FULL` |
 | `entropy` | Normalised Shannon entropy of the velocity over the last `GO2_FEED_ENTROPY_S` seconds: 0 when movement is steady, 1 when erratic |
 | `trackHuman` | `true` while a person is seen; `headYaw` / `headPitch` stay 0, as the Go2 has no separate head |
+| `boxLeft` … `boxBottom` | The box edges through the camera's field of view, assuming a level camera |
 
 Without a person for `GO2_FEED_LOST_S` the inputs go back to neutral (5 m, no movement, no confidence, scale 0, head straight ahead). The robot turning moves the whole image, so it counts as human movement.
 
@@ -437,6 +452,8 @@ All settings via environment variables:
 | `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
 | `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives human/robot inputs from robot-data publishers |
 | `GO2_VIZ_PARAM_HOST` | `localhost` | Host running `go2_viz` (for `go2_viz.feed` and `go2_viz.send`) |
+| `GO2_VIZ_TEXTURE` | — | Human colour channel for offline tests: `pattern` or an equirectangular image file |
+| `GO2_VIZ_BLUR` | `0.03` | Blur of the human channel texture (sigma, fraction of its width) |
 | `GO2_FEED_HFOV` | `120` | Horizontal field of view of the front camera (°), for bearing and distance |
 | `GO2_FEED_PERSON_H` | `1.7` | Assumed body height (m) for the distance estimate |
 | `GO2_FEED_TORSO` | `0.5` | Assumed shoulder-to-hip length (m) for the distance estimate |
