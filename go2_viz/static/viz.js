@@ -36,6 +36,9 @@ const params = {
   flowSpeed: 0.08,    // flow field time scale
   wander: 0.004,      // chance per frame to hop to a neighbouring map point
   jitter: 0,          // erratic twitching in place: 0 = smooth, 1 = up to ±JITTER_RANGE per axis
+  markerChance: 0,    // chance that a particle is drawn as a matplotlib-style marker instead of a disc
+  markerChange: 0.2,  // marker changes per second for each marker particle
+  outlineChance: 0.3, // chance that a newly drawn marker shows only its outline
   floorShare: 0.15,   // share of particles on the floor; the rest go to walls and objects
   size: 0.05,
   opacity: 0.55,
@@ -77,30 +80,148 @@ const colors = new Float32Array(MAX_PARTICLES * 3);
 const targetIndex = new Int32Array(MAX_PARTICLES);
 const fade = new Float32Array(MAX_PARTICLES).fill(1); // 0 = background colour, 1 = fully visible
 const saturation = new Float32Array(MAX_PARTICLES);   // 0 = gray, 1 = full colour (field of view)
+// fixed per-particle roll: the particle carries a marker while markerRoll < markerChance,
+// so moving the slider adds or removes markers instead of reshuffling all of them
+const markerRoll = Float32Array.from({ length: MAX_PARTICLES }, Math.random);
+const markerTile = new Float32Array(MAX_PARTICLES).fill(-1);
 
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute("position", new THREE.BufferAttribute(drawn, 3).setUsage(THREE.DynamicDrawUsage));
 geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
+// atlas tile per particle: -1 = soft disc, otherwise 2 × marker index (+1 = outline only)
+geometry.setAttribute("tile", new THREE.BufferAttribute(markerTile, 1).setUsage(THREE.DynamicDrawUsage));
 geometry.setDrawRange(0, 0);
 
-function discTexture() {
-  const c = document.createElement("canvas");
-  c.width = c.height = 64;
-  const g = c.getContext("2d");
-  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-  grad.addColorStop(0, "rgba(255,255,255,1)");
-  grad.addColorStop(0.35, "rgba(255,255,255,0.6)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 64, 64);
-  return new THREE.CanvasTexture(c);
+// ── markers (after matplotlib's marker set) ──────────────────────
+
+const MARKERS = ["o", "s", "^", "v", "<", ">", "D", "d", "p", "h", "8", "*", "P", "X", "+", "x"];
+const LINE_ONLY = new Set(["+", "x"]); // drawn as strokes in both variants
+const TILE = 64, ATLAS_COLS = 8, ATLAS_ROWS = (MARKERS.length * 2) / ATLAS_COLS;
+
+// closed path through n points on a circle; inner > 0 alternates with an inner radius (star)
+function polygonPath(g, n, r, rot, inner = 0) {
+  g.beginPath();
+  const count = inner ? n * 2 : n;
+  for (let k = 0; k < count; k++) {
+    const rr = inner && k % 2 ? inner : r;
+    const a = rot + (k / count) * Math.PI * 2;
+    g.lineTo(rr * Math.cos(a), rr * Math.sin(a));
+  }
+  g.closePath();
 }
 
-const material = new THREE.PointsMaterial({
-  size: params.size, map: discTexture(), vertexColors: true, transparent: true,
-  opacity: params.opacity, depthWrite: false, sizeAttenuation: true,
+// thick plus as a 12-corner outline (matplotlib "P"); rotate 45° for "X"
+function plusPath(g, r, rot) {
+  const w = r * 0.33;
+  const pts = [[w, r], [w, w], [r, w], [r, -w], [w, -w], [w, -r], [-w, -r], [-w, -w], [-r, -w], [-r, w], [-w, w], [-w, r]];
+  g.beginPath();
+  for (const [x, y] of pts) g.lineTo(x * Math.cos(rot) - y * Math.sin(rot), x * Math.sin(rot) + y * Math.cos(rot));
+  g.closePath();
+}
+
+// canvas y points down, so "up" is -90°
+function drawMarker(g, m, r) {
+  const up = -Math.PI / 2;
+  switch (m) {
+    case "o": g.beginPath(); g.arc(0, 0, r, 0, Math.PI * 2); break;
+    case "s": polygonPath(g, 4, r, Math.PI / 4); break;
+    case "^": polygonPath(g, 3, r, up); break;
+    case "v": polygonPath(g, 3, r, -up); break;
+    case "<": polygonPath(g, 3, r, Math.PI); break;
+    case ">": polygonPath(g, 3, r, 0); break;
+    case "D": polygonPath(g, 4, r, 0); break;
+    case "d": g.save(); g.scale(0.6, 1); polygonPath(g, 4, r, 0); g.restore(); break;
+    case "p": polygonPath(g, 5, r, up); break;
+    case "h": polygonPath(g, 6, r, up); break;
+    case "8": polygonPath(g, 8, r, Math.PI / 8); break;
+    case "*": polygonPath(g, 5, r, up, r * 0.4); break;
+    case "P": plusPath(g, r, 0); break;
+    case "X": plusPath(g, r, Math.PI / 4); break;
+    case "+": g.beginPath(); g.moveTo(-r, 0); g.lineTo(r, 0); g.moveTo(0, -r); g.lineTo(0, r); break;
+    case "x": { const q = r * Math.SQRT1_2; g.beginPath(); g.moveTo(-q, -q); g.lineTo(q, q); g.moveTo(-q, q); g.lineTo(q, -q); break; }
+  }
+}
+
+function markerAtlas() {
+  const c = document.createElement("canvas");
+  c.width = TILE * ATLAS_COLS;
+  c.height = TILE * ATLAS_ROWS;
+  const g = c.getContext("2d");
+  g.fillStyle = g.strokeStyle = "#fff";
+  g.lineJoin = "miter";
+  g.miterLimit = 10;
+  MARKERS.forEach((m, i) => {
+    for (const outline of [false, true]) {
+      const tile = i * 2 + (outline ? 1 : 0);
+      g.save();
+      g.translate((tile % ATLAS_COLS + 0.5) * TILE, (Math.floor(tile / ATLAS_COLS) + 0.5) * TILE);
+      drawMarker(g, m, TILE * 0.36);  // padding keeps mipmaps from bleeding into neighbours
+      if (outline || LINE_ONLY.has(m)) { g.lineWidth = TILE * 0.08; g.stroke(); } else g.fill();
+      g.restore();
+    }
+  });
+  const texture = new THREE.CanvasTexture(c);
+  texture.anisotropy = 4;
+  return texture;
+}
+
+const material = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  uniforms: {
+    size: { value: params.size },
+    scale: { value: 1 },  // half the drawing buffer height, for size attenuation like PointsMaterial
+    opacity: { value: params.opacity },
+    atlas: { value: markerAtlas() },
+    grid: { value: new THREE.Vector2(ATLAS_COLS, ATLAS_ROWS) },
+  },
+  vertexShader: /* glsl */ `
+    attribute vec3 color;
+    attribute float tile;
+    uniform float size;
+    uniform float scale;
+    varying vec3 vColor;
+    varying float vTile;
+    void main() {
+      vColor = color;
+      vTile = tile;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * scale / -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */ `
+    uniform float opacity;
+    uniform sampler2D atlas;
+    uniform vec2 grid;
+    varying vec3 vColor;
+    varying float vTile;
+    void main() {
+      float alpha;
+      if (vTile < 0.0) {
+        // the original soft disc: alpha 1 → 0.6 at 35 % radius → 0 at the edge
+        float d = length(gl_PointCoord * 2.0 - 1.0);
+        alpha = d < 0.35 ? mix(1.0, 0.6, d / 0.35) : mix(0.6, 0.0, clamp((d - 0.35) / 0.65, 0.0, 1.0));
+      } else {
+        float col = mod(vTile, grid.x), row = floor(vTile / grid.x);
+        vec2 uv = vec2((col + gl_PointCoord.x) / grid.x, 1.0 - (row + gl_PointCoord.y) / grid.y);
+        alpha = texture2D(atlas, uv).a;
+      }
+      if (alpha < 0.01) discard;
+      gl_FragColor = vec4(vColor, alpha * opacity);
+      #include <colorspace_fragment>
+    }`,
 });
 scene.add(new THREE.Points(geometry, material));
+
+function updatePointScale() {
+  material.uniforms.scale.value = renderer.getDrawingBufferSize(new THREE.Vector2()).y / 2;
+}
+updatePointScale();
+
+// a random marker tile, outline-only with probability outlineChance
+function randomMarkerTile() {
+  return Math.floor(Math.random() * MARKERS.length) * 2 + (Math.random() < params.outlineChance ? 1 : 0);
+}
 
 const robot = new THREE.Group();
 robot.add(new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), new THREE.MeshBasicMaterial({ color: 0x9a9da3 })));
@@ -319,6 +440,7 @@ function step(dt, time) {
   const cosHalf = Math.cos(THREE.MathUtils.degToRad(params.fov / 2));
   const range2 = params.fovRange * params.fovRange;
   const gain = dt / SATURATE, loss = dt / params.desaturate;
+  const markerSwitch = params.markerChange * dt;
 
   for (let i = 0; i < n; i++) {
     const p = i * 3;
@@ -365,6 +487,9 @@ function step(dt, time) {
     }
     saturation[i] = sat;
 
+    if (markerRoll[i] >= params.markerChance) markerTile[i] = -1;
+    else if (markerTile[i] < 0 || Math.random() < markerSwitch) markerTile[i] = randomMarkerTile();
+
     const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
     const glow = 0.45 + Math.min(speed * 0.6, 1.2);
     if (params.colorMode === "height") {
@@ -392,6 +517,7 @@ function step(dt, time) {
   }
   geometry.attributes.position.needsUpdate = true;
   geometry.attributes.color.needsUpdate = true;
+  geometry.attributes.tile.needsUpdate = true;
 }
 
 // ── UI ───────────────────────────────────────────────────────────
@@ -408,10 +534,14 @@ swarm.add(params, "wander", 0, 0.3, 0.005);
 swarm.add(params, "jitter", 0, 1, 0.01);
 swarm.add(params, "floorShare", 0, 1, 0.01).name("floor share").onChange(() => scatterParticles(0, MAX_PARTICLES));
 const look = gui.addFolder("Look");
-look.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.size = v; });
-look.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.opacity = v; });
+look.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.uniforms.size.value = v; });
+look.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.uniforms.opacity.value = v; });
 look.add(params, "colorMode", ["gray", "height", "speed", "white"]);
 look.add(params, "ceiling", 0.3, 5, 0.1).name("ceiling (m)").onChange(rebuildTargets);
+const markers = gui.addFolder("Markers");
+markers.add(params, "markerChance", 0, 1, 0.01).name("marker chance");
+markers.add(params, "markerChange", 0, 5, 0.05).name("changes / s");
+markers.add(params, "outlineChance", 0, 1, 0.01).name("outline chance");
 const robotFolder = gui.addFolder("Robot");
 robotFolder.add(params, "showRobot").onChange((v) => { robot.visible = v && robotKnown; });
 robotFolder.add(params, "showFov").name("show field of view").onChange((v) => { fovCone.visible = v; });
@@ -491,4 +621,5 @@ window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  updatePointScale();
 });
