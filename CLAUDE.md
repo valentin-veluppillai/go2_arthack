@@ -26,12 +26,23 @@ go2/
 ├── go2_mcp/             # MCP server (python -m go2_mcp)
 │   ├── server.py        # FastMCP tools → ZMQ bridge client
 │   └── __main__.py      # Entry point (stdio transport)
+<<<<<<< HEAD
 ├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
 ├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
 ├── requirements_map.txt
+=======
+├── go2_yolo/            # YOLO detection on the camera stream (python -m go2_yolo)
+│   └── __main__.py      # SUB camera → YOLO → window + PUB on port 5557
+├── go2_follow/          # Keep a person in frame from YOLO boxes, SPACE = deadman (python -m go2_follow)
+├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
+├── go2_py311/           # Python 3.11 venv (not committed)
+├── requirements_bridge.txt
+├── requirements_yolo.txt
+├── requirements_follow.txt
+>>>>>>> person-follow
 └── CLAUDE.md
 ```
 
@@ -56,12 +67,20 @@ python -m go2_webapp
 # MCP server (for Claude Code / Claude Desktop)
 python -m go2_mcp
 
+<<<<<<< HEAD
 # LiDAR subscriber (logs point counts)
 python -m go2_lidar
 
 # Live 3D map from the on-board SLAM (deps: pip install -r requirements_map.txt)
 # sends mapping/start; 'cli_client.py slam mapping/stop' saves and overwrites the robot's single map slot
 python -m go2_map
+=======
+# YOLO detection (separate deps: pip install -r requirements_yolo.txt)
+python -m go2_yolo
+
+# Person follow (needs go2_yolo running; hold SPACE in its window to move)
+python -m go2_follow
+>>>>>>> person-follow
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):

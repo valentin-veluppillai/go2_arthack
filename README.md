@@ -160,6 +160,7 @@ mcp dev go2_mcp/server.py
 }
 ```
 
+<<<<<<< HEAD
 ### 5. LiDAR Subscriber
 
 The bridge forwards the Go2's LiDAR point cloud (`rt/utlidar/cloud`, `sensor_msgs/PointCloud2`) on port 5558. `go2_lidar` subscribes to it and logs how many points arrive, which is a quick way to check the LiDAR is reachable:
@@ -196,6 +197,43 @@ Indoor ceilings would cover the map, so points more than 1.5 m above the robot's
 **Moving objects.** People walking past the robot would leave trails ("ghosts") in the map. `go2_map` keeps a 10 cm occupancy grid next to the map: every scan ray marks the space it passes through as free, so cells that were only briefly occupied are cleared again, while walls and furniture keep getting hit. Scan points that land in space seen free before are drawn in magenta as `world/moving`, which shows people while they are there. Turn the filter off with `GO2_MAP_FILTER=0`.
 
 **PLY export.** When you stop `go2_map` with Ctrl+C it writes the whole map (moving objects removed, no ceiling cut) as a binary PLY with height colours, `go2_map_<timestamp>.ply` in the current directory. Set `GO2_MAP_PLY=path.ply` for a fixed name or `GO2_MAP_PLY=0` to skip it.
+=======
+### 5. YOLO Object Detection
+
+`go2_yolo` subscribes to the camera stream, runs [Ultralytics YOLO](https://docs.ultralytics.com) on the newest frame, shows the annotated feed in a window and republishes the results on its own PUB socket (port 5557). It doesn't need the Unitree SDK, so it can run in any Python 3.9+ environment on a machine that can reach the bridge.
+
+```bash
+pip install -r requirements_yolo.txt
+python -m go2_yolo                          # window with annotated feed (q / Esc to quit)
+GO2_YOLO_SHOW=0 python -m go2_yolo          # headless, only publishes
+GO2_YOLO_DEVICE=mps python -m go2_yolo      # Apple GPU (use 0 for CUDA)
+```
+
+The model weights (`yolo11n.pt` by default) are downloaded on first run. Frames that arrive while a frame is being processed are dropped, so detection always runs on the latest image.
+
+| Topic (port 5557) | Payload |
+|-------|---------|
+| `camera_yolo` | Annotated JPEG bytes |
+| `detections` | JSON: `{"ts", "width", "height", "detections": [{"cls", "conf", "box": [x1, y1, x2, y2]}]}` |
+
+### 6. Person Follow
+
+`go2_follow` keeps a person in the camera frame using the YOLO detections. It picks the largest person and applies two simple rules:
+
+- **Turn:** box centre in the left / right 30 % of the image → turn left / right
+- **Distance:** box smaller than 5 % of the frame → walk forward; larger than 20 % → walk backward
+
+**Deadman switch:** the robot only moves while **SPACE is held** in the follower window. Releasing it, or the window losing focus, sends an immediate `stop`. If the follower crashes, the bridge's 250 ms movement timeout stops the robot.
+
+```bash
+pip install -r requirements_follow.txt
+python go2_client/cli_client.py action stand_up    # terminal 1, with the bridge running
+GO2_YOLO_SHOW=0 python -m go2_yolo                 # terminal 2
+python -m go2_follow                               # terminal 3: hold SPACE to follow, q / Esc to quit
+```
+
+The window shows the annotated camera feed, the turn zones (yellow lines) and the current command. Obstacle avoidance stays active if it is enabled in the bridge.
+>>>>>>> person-follow
 
 ## ZMQ Protocol
 
@@ -289,6 +327,7 @@ All settings via environment variables:
 | `GO2_BRIDGE_HOST` | `localhost` | Bridge host (for clients) |
 | `GO2_WEBAPP_HOST` | `0.0.0.0` | Web app bind address |
 | `GO2_WEBAPP_PORT` | `8080` | Web app port |
+<<<<<<< HEAD
 | `GO2_LIDAR` | `1` | Enable the LiDAR publisher in the bridge |
 | `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
 | `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
@@ -303,6 +342,20 @@ All settings via environment variables:
 | `GO2_MAP_FILTER` | `1` | Remove moving objects (people walking past) from the map |
 | `GO2_MAP_FILTER_CELL` | `0.1` | Cell size in metres of the occupancy grid used by the filter |
 | `GO2_MAP_PLY` | `go2_map_<timestamp>.ply` | Map file written on exit (`0` = off) |
+=======
+| `GO2_YOLO_PUB_PORT` | `5557` | YOLO results PUB port |
+| `GO2_YOLO_MODEL` | `yolo11n.pt` | YOLO weights (name or path) |
+| `GO2_YOLO_CONF` | `0.4` | Detection confidence threshold |
+| `GO2_YOLO_DEVICE` | auto | Inference device (`cpu`, `mps`, `0`, …) |
+| `GO2_YOLO_SHOW` | `1` | Show the annotated feed in a window |
+| `GO2_YOLO_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_yolo` (for `go2_follow`) |
+| `GO2_FOLLOW_EDGE` | `0.3` | Turn when the person's centre is within this fraction of the left/right edge |
+| `GO2_FOLLOW_AREA_FAR` | `0.05` | Walk forward when the person box is smaller than this fraction of the frame |
+| `GO2_FOLLOW_AREA_NEAR` | `0.20` | Walk backward when the person box is larger than this fraction of the frame |
+| `GO2_FOLLOW_VX` | `0.3` | Forward/backward speed (m/s) |
+| `GO2_FOLLOW_VYAW` | `0.6` | Turn speed (rad/s) |
+| `GO2_FOLLOW_CONF` | `0.5` | Minimum confidence for a person detection |
+>>>>>>> person-follow
 
 ## Writing Custom Clients
 

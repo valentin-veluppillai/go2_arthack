@@ -24,5 +24,10 @@ Thumbs.db
 *.jpg
 *.png
 
+<<<<<<< HEAD
 # Map exports
 *.ply
+=======
+# YOLO weights (downloaded on first run)
+*.pt
+>>>>>>> person-follow
