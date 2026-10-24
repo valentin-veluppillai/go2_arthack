@@ -20,13 +20,14 @@ A reusable interface layer for the Unitree Go2 quadruped robot. A ZeroMQ bridge 
 └─────────────┘                  └──────────────────┘
 ```
 
-**go2_bridge** runs three threads:
+**go2_bridge** runs four threads:
 
 | Thread | Purpose | Rate |
 |--------|---------|------|
 | **command_handler** | ZMQ REQ/REP on port 5555 — dispatches action, move, stop, config commands | On demand |
 | **movement_loop** | Relays last commanded velocity to the robot via SDK | 20 Hz |
 | **camera_publisher** | Grabs JPEG frames from VideoClient, publishes on ZMQ PUB port 5556 | 10 FPS |
+| **lidar_publisher** | Subscribes to the LiDAR `PointCloud2` DDS topic, publishes on ZMQ PUB port 5558 | ~15 Hz (sensor rate) |
 
 ### Movement Safety
 
@@ -158,6 +159,18 @@ mcp dev go2_mcp/server.py
 }
 ```
 
+### 5. LiDAR Subscriber
+
+The bridge forwards the Go2's LiDAR point cloud (`rt/utlidar/cloud`, `sensor_msgs/PointCloud2`) on port 5558. `go2_lidar` subscribes to it and logs how many points arrive, which is a quick way to check the LiDAR is reachable:
+
+```bash
+python -m go2_lidar
+# First cloud: 3000 points, 16 bytes/point, fields ['x', 'y', 'z', 'intensity'], frame 'utlidar_lidar'
+# 14.6 clouds/s, 3000 points/cloud (last: 3000)
+```
+
+It only needs `pyzmq`, so it can run on any machine that can reach the bridge.
+
 ## ZMQ Protocol
 
 ### Commands (REQ/REP — port 5555)
@@ -192,6 +205,14 @@ Response format:
 | `camera` | Raw JPEG bytes | ~10 FPS |
 
 Subscribe with topic filter `b"camera"`. Frames arrive as two-part multipart messages: `[topic, jpeg_data]`.
+
+### LiDAR Stream (PUB/SUB — port 5558)
+
+| Topic | Payload | Rate |
+|-------|---------|------|
+| `lidar` | `[topic, meta_json, point_data]` | ~15 Hz |
+
+`meta_json` carries the PointCloud2 header: `stamp`, `frame_id`, `width`, `height`, `point_step`, `row_step`, `is_bigendian`, `is_dense` and `fields` (`name`, `offset`, `datatype`, `count`). `point_data` is the raw PointCloud2 data buffer (`width × height × point_step` bytes), so it can be turned into a NumPy structured array with the field offsets.
 
 ## Available Actions
 
@@ -231,6 +252,10 @@ All settings via environment variables:
 | `GO2_BRIDGE_HOST` | `localhost` | Bridge host (for clients) |
 | `GO2_WEBAPP_HOST` | `0.0.0.0` | Web app bind address |
 | `GO2_WEBAPP_PORT` | `8080` | Web app port |
+| `GO2_LIDAR` | `1` | Enable the LiDAR publisher in the bridge |
+| `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
+| `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
+| `GO2_ZMQ_LIDAR_PORT` | `5558` | LiDAR PUB/SUB port |
 
 ## Writing Custom Clients
 

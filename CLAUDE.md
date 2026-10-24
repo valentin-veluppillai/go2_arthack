@@ -14,6 +14,7 @@ go2/
 │   ├── robot.py         # SDK wrapper (SportClient, ObstaclesAvoidClient, VideoClient)
 │   ├── movement_loop.py # 20 Hz heartbeat thread with 250ms timeout safety
 │   ├── camera_publisher.py  # Camera JPEG → ZMQ PUB thread
+│   ├── lidar_publisher.py   # LiDAR PointCloud2 (DDS) → ZMQ PUB thread (port 5558)
 │   ├── command_handler.py   # ZMQ REQ/REP command dispatcher
 │   └── __main__.py      # Entry point, wires components, graceful shutdown
 ├── go2_client/
@@ -24,6 +25,7 @@ go2/
 ├── go2_mcp/             # MCP server (python -m go2_mcp)
 │   ├── server.py        # FastMCP tools → ZMQ bridge client
 │   └── __main__.py      # Entry point (stdio transport)
+├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
@@ -50,6 +52,9 @@ python -m go2_webapp
 
 # MCP server (for Claude Code / Claude Desktop)
 python -m go2_mcp
+
+# LiDAR subscriber (logs point counts)
+python -m go2_lidar
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):
@@ -80,6 +85,10 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_BRIDGE_HOST` | `localhost` | Bridge host (for clients) |
 | `GO2_WEBAPP_HOST` | `0.0.0.0` | Web app bind address |
 | `GO2_WEBAPP_PORT` | `8080` | Web app HTTP port |
+| `GO2_LIDAR` | `1` | Enable the LiDAR publisher in the bridge |
+| `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
+| `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
+| `GO2_ZMQ_LIDAR_PORT` | `5558` | LiDAR PUB/SUB port |
 
 ## ZMQ Protocol
 
@@ -114,7 +123,7 @@ Commands go over REQ/REP (port 5555). Streams go over PUB/SUB (port 5556).
 
 ## Architecture Conventions
 
-- Bridge components are started as daemon threads (movement_loop, camera_publisher, command_handler)
+- Bridge components are started as daemon threads (movement_loop, camera_publisher, command_handler, lidar_publisher)
 - Movement safety: 20 Hz heartbeat relays last velocity; 250ms timeout zeros velocity automatically
 - Graceful shutdown via SIGINT/SIGTERM: zeros velocity, disables remote API control, terminates ZMQ context
 - Web app uses async ZMQ (`zmq.asyncio`) for non-blocking bridge communication
