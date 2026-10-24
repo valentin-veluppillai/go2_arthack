@@ -171,7 +171,7 @@ python -m go2_lidar
 
 It only needs `pyzmq`, so it can run on any machine that can reach the bridge.
 
-`go2_lidar.depth` renders the stream as a 360° depth image: azimuth runs across (straight ahead in the centre, left of the robot on the left), elevation runs down, and each pixel is the distance from the sensor. Near is red, far is blue, no return is black. The L1 is sparse per scan, so the last 10 clouds are merged and small gaps are filled with the nearest neighbouring point.
+`go2_lidar.depth` renders the stream as a front-view depth image, as seen from the front camera: each pixel is the forward distance of the nearest LiDAR point. Near is red, far is blue, no return is black. The L1 is mounted almost upside down in the chin (URDF `radar_joint`, pitch ≈ 165°), so points are first transformed into the body frame. The L1 is also sparse (roughly 1–2k points per scan, most outside the front view), so the image is kept small (320 × 180), the last 20 clouds (~1.3 s) are merged and empty pixels are filled from their nearest neighbours.
 
 ```bash
 pip install -r requirements_lidar.txt
@@ -266,10 +266,13 @@ All settings via environment variables:
 | `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
 | `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
 | `GO2_ZMQ_LIDAR_PORT` | `5558` | LiDAR PUB/SUB port |
-| `GO2_DEPTH_WIDTH` | `720` | Depth image width in pixels (height = width / 2) |
-| `GO2_DEPTH_MAX_RANGE` | `10` | Range in metres mapped to the coldest colour |
-| `GO2_DEPTH_ACCUMULATE` | `10` | Number of recent clouds merged into one image |
-| `GO2_DEPTH_FILL` | `5` | Gap-fill kernel size (0 = off) |
+| `GO2_LIDAR_MOUNT` | `0.28945 0 -0.046825 0 2.8782 0` | LiDAR → body transform `x y z roll pitch yaw` (URDF `radar_joint`) |
+| `GO2_DEPTH_CAMERA_POS` | `0.32715 0 0.04297` | Virtual camera position in the body frame (URDF front camera) |
+| `GO2_DEPTH_WIDTH` / `GO2_DEPTH_HEIGHT` | `320` / `180` | Depth image size in pixels |
+| `GO2_DEPTH_HFOV` | `90` | Horizontal field of view in degrees |
+| `GO2_DEPTH_MAX_RANGE` | `10` | Depth in metres mapped to the coldest colour |
+| `GO2_DEPTH_ACCUMULATE` | `20` | Number of recent clouds merged into one image |
+| `GO2_DEPTH_FILL` | `9` | Largest window used to fill empty pixels (0 = off) |
 | `GO2_DEPTH_SHOW` | `1` | Show the depth image in a window |
 | `GO2_DEPTH_SAVE` | — | Save the image to this path once per second |
 
