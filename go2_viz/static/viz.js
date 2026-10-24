@@ -22,6 +22,7 @@ const FADE_IN = 2.0;  // s, respawned particles fade in from the background
 const JITTER_RANGE = 0.06; // m, largest twitch offset at jitter = 1
 const JITTER_RATE = 0.35;  // chance per 1/60 s that a particle twitches to a new offset
 const SATURATE = 0.4;      // s to reach full colour inside the field of view
+const SHAPE_RATE = 6;      // vertex-count changes per second at roughness 1
 const HEAD_OFFSET = new THREE.Vector3(0.3, 0.1, 0); // robot head in its own frame (three.js axes: x forward, y up)
 // map frame (z up) → three.js frame (y up): -90° about x
 const MAP_TO_THREE = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
@@ -39,7 +40,7 @@ const params = {
   floorShare: 0.15,   // share of particles on the floor; the rest go to walls and objects
   size: 0.05,
   opacity: 0.55,
-  roughness: 0,       // particle shape: 0 = smooth soft disc, 1 = pointy, splintered cluster
+  roughness: 0,       // particle shape: 0 = circle, 1 = low-n polygon changing its vertex count
   ceiling: 1.8,       // hide map points this far above the floor (m)
   colorMode: "gray",
   autoRotate: true,
@@ -86,8 +87,9 @@ geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THR
 geometry.setAttribute("seed", new THREE.BufferAttribute(Float32Array.from({ length: MAX_PARTICLES }, Math.random), 1));
 geometry.setDrawRange(0, 0);
 
-// Point sprites drawn procedurally: at roughness 0 a soft round disc, towards 1 the
-// outline gets jagged spikes, the edge hardens and small splinters break off around it.
+// Point sprites drawn procedurally with crisp edges: at roughness 0 a circle, towards 1
+// a polygon with 3–6 sharp corners whose vertex count keeps changing, faster the
+// rougher it is.
 const material = new THREE.ShaderMaterial({
   transparent: true,
   depthWrite: false,
@@ -96,6 +98,7 @@ const material = new THREE.ShaderMaterial({
     scale: { value: 1 },          // half the drawing buffer height, for size attenuation
     opacity: { value: params.opacity },
     roughness: { value: params.roughness },
+    time: { value: 0 },
   },
   vertexShader: /* glsl */ `
     attribute vec3 color;
@@ -114,26 +117,35 @@ const material = new THREE.ShaderMaterial({
   fragmentShader: /* glsl */ `
     uniform float opacity;
     uniform float roughness;
+    uniform float time;
     varying vec3 vColor;
     varying float vSeed;
+
+    float hash(float x) { return fract(sin(x * 127.1) * 43758.5453); }
+
+    // signed distance to a regular n-gon with inradius r and rotation rot (sharp corners)
+    float sdPolygon(vec2 p, float n, float r, float rot) {
+      float half_ = 3.14159265 / n;
+      float a = atan(p.y, p.x) + rot;
+      float b = mod(a + half_, 2.0 * half_) - half_;
+      return length(p) * cos(b) - r;
+    }
+
     void main() {
       vec2 uv = gl_PointCoord * 2.0 - 1.0;
-      float d = length(uv);
-      float a = atan(uv.y, uv.x);
-      // jagged outline: two interfering angular waves, phase-shifted per particle
-      float spikes = 0.5 + 0.5 * sin(a * 5.0 + vSeed * 6.2832) * sin(a * 3.0 - vSeed * 17.0);
-      float edge = mix(1.0, 0.3 + 0.65 * pow(spikes, 2.5), roughness);
-      float soft = mix(1.0, 0.06, roughness);
-      float alpha = 1.0 - smoothstep(edge - soft, edge, d);
-      // splinters around the core
-      for (int k = 0; k < 3; k++) {
-        float fk = float(k);
-        float ang = vSeed * 40.0 + fk * 2.1;
-        float rad = 0.55 + 0.3 * fract(vSeed * 7.3 + fk * 0.37);
-        float r = 0.2 * roughness;
-        float frag = 1.0 - smoothstep(r * 0.4, r, length(uv - rad * vec2(cos(ang), sin(ang))));
-        alpha = max(alpha, roughness * frag);
-      }
+
+      // vertex count: 3–6, re-drawn per particle at a rate that grows with roughness
+      float phase = floor(time * roughness * ${SHAPE_RATE.toFixed(1)} + vSeed * 17.0);
+      float n = 3.0 + floor(hash(vSeed * 91.7 + phase) * 4.0);
+      float rot = 6.2831853 * hash(vSeed * 13.3 + phase * 0.37);
+
+      // roughness blends a circle into the polygon; the polygon's corners touch the circle
+      float circle = length(uv) - 0.9;
+      float polygon = sdPolygon(uv, n, 0.9 * cos(3.14159265 / n), rot);
+      float d = mix(circle, polygon, roughness);
+
+      float aa = fwidth(d);  // one-pixel edge, no blur
+      float alpha = 1.0 - smoothstep(-aa, aa, d);
       if (alpha < 0.01) discard;
       gl_FragColor = vec4(vColor, alpha * opacity);
       #include <colorspace_fragment>
@@ -517,6 +529,7 @@ const clock = new THREE.Clock();
 function frame() {
   const dt = Math.min(clock.getDelta(), 1 / 20);
   step(dt, clock.elapsedTime);
+  material.uniforms.time.value = clock.elapsedTime;
   robot.position.lerp(robotTarget, 1 - Math.exp(-dt * 3));
   robot.quaternion.slerp(robotQuatTarget, 1 - Math.exp(-dt * 3));
   controls.autoRotate = params.autoRotate;
