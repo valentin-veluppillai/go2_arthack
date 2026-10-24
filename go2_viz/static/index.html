@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Go2 Map Swarm</title>
+  <style>
+    :root { --bg: #05060a; --fg: #d8dce6; --muted: #7d8494; --accent: #ff8c1a; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+                 font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
+    canvas { display: block; }
+    #hud { position: fixed; top: 12px; left: 12px; padding: 10px 12px; border-radius: 8px;
+           background: rgba(10, 12, 18, 0.72); backdrop-filter: blur(6px); min-width: 220px; }
+    #hud .row { display: flex; justify-content: space-between; gap: 16px; }
+    #hud .label { color: var(--muted); }
+    #hud .live { color: #5ad17a; } #hud .stale { color: #e0b040; } #hud .off { color: #e05a5a; }
+    #actions { margin-top: 8px; display: flex; gap: 6px; }
+    button { font: inherit; color: var(--fg); background: #1b1f2a; border: 1px solid #2c3242;
+             border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    button.recording { background: #6a1d1d; border-color: #e05a5a; }
+    #waiting { position: fixed; inset: 0; display: grid; place-items: center; color: var(--muted);
+               pointer-events: none; }
+  </style>
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+        "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.min.js"
+    } }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <div class="row"><span class="label">source</span><span id="source">–</span></div>
+    <div class="row"><span class="label">link</span><span id="link" class="off">connecting</span></div>
+    <div class="row"><span class="label">map points</span><span id="points">0</span></div>
+    <div class="row"><span class="label">map updates</span><span id="updates">0</span></div>
+    <div class="row"><span class="label">last update</span><span id="age">–</span></div>
+    <div class="row"><span class="label">fps</span><span id="fps">0</span></div>
+    <div id="actions">
+      <button id="snapshot" title="Save the current frame as PNG">Snapshot</button>
+      <button id="record" title="Record the frame stream as WebM">Record</button>
+    </div>
+  </div>
+  <div id="waiting">waiting for map data…</div>
+  <script type="module" src="/static/viz.js"></script>
+</body>
+</html>

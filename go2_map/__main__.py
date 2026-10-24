@@ -12,6 +12,9 @@ as free, so cells that were only briefly occupied are cleared again, while
 walls and furniture keep getting hit. Scan points that land in space seen
 free before are shown separately as "moving".
 
+The cleaned map is also published once per second on ZMQ PUB port 5560 as
+[b"occupancy", meta_json, float32 xyz] for other apps such as go2_viz.
+
 uslam only publishes while it is mapping (or localized on a saved map), so by
 default this sends "mapping/start" through the bridge at startup.
 """
@@ -30,6 +33,7 @@ import zmq
 BRIDGE_HOST = os.getenv("GO2_BRIDGE_HOST", "localhost")
 CMD_PORT = int(os.getenv("GO2_ZMQ_CMD_PORT", "5555"))
 SLAM_PORT = int(os.getenv("GO2_ZMQ_SLAM_PORT", "5559"))
+MAP_PUB_PORT = int(os.getenv("GO2_MAP_PUB_PORT", "5560"))  # cleaned map for other apps
 MAP_VOXEL = float(os.getenv("GO2_MAP_VOXEL", "0.05"))  # metres per map point
 # hide points more than this far above the robot's start height, so indoor ceilings
 # don't cover the map (0 = show everything)
@@ -214,6 +218,9 @@ def main() -> None:
         sub.subscribe(topic)
     log.info("Subscribed to tcp://%s:%d", BRIDGE_HOST, SLAM_PORT)
 
+    pub = ctx.socket(zmq.PUB)
+    pub.bind(f"tcp://*:{MAP_PUB_PORT}")
+
     init_viewer()
     if MAP_START:
         time.sleep(0.3)  # let the SUB socket connect so the ack isn't missed
@@ -221,6 +228,10 @@ def main() -> None:
 
     voxels = VoxelMap(MAP_VOXEL)
     grid = OccupancyGrid(MAP_FILTER_CELL)
+
+    def map_points() -> np.ndarray:
+        """Whole map with moving objects removed (no ceiling cut)."""
+        return voxels.points[grid.odds_at(voxels.points) >= 0] if MAP_FILTER else voxels.points
     odom: dict | None = None
     moving = np.empty((0, 3), dtype=np.float32)
     path: list[list[float]] = []
@@ -271,6 +282,14 @@ def main() -> None:
                 rr.log("world/map", rr.Points3D(shown, colors=height_colors(shown[:, 2]), radii=MAP_VOXEL / 2))
                 if len(path) > 1:
                     rr.log("world/path", rr.LineStrips3D([path], colors=[255, 140, 0]))
+                occupied = map_points()
+                pub.send_multipart([b"occupancy", json.dumps({
+                    "stamp": now,
+                    "count": len(occupied),
+                    "voxel": MAP_VOXEL,
+                    "z_ref": z_ref,
+                    "robot": {"position": odom["position"], "orientation": odom["orientation"]} if odom else None,
+                }).encode(), occupied.astype("<f4").tobytes()])
                 log.info("map: %d points shown (%d scans), extent %s m, %d moving points in the last scan",
                          len(shown), clouds,
                          [round(float(v), 1) for v in np.ptp(voxels.points, axis=0)] if len(voxels.points) else "-",
@@ -285,10 +304,10 @@ def main() -> None:
         pass
     finally:
         sub.close()
+        pub.close()
         ctx.term()
         if MAP_PLY != "0" and len(voxels.points):
-            # full map (no ceiling cut), moving objects removed
-            points = voxels.points[grid.odds_at(voxels.points) >= 0] if MAP_FILTER else voxels.points
+            points = map_points()
             path_ply = MAP_PLY or time.strftime("go2_map_%Y%m%d_%H%M%S.ply")
             save_ply(path_ply, points, height_colors(points[:, 2]))
             log.info("Saved %d map points to %s", len(points), os.path.abspath(path_ply))

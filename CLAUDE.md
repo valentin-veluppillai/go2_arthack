@@ -27,11 +27,15 @@ go2/
 │   ├── server.py        # FastMCP tools → ZMQ bridge client
 │   └── __main__.py      # Entry point (stdio transport)
 ├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
-├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map)
+├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map), PUB on port 5560
+├── go2_viz/             # Browser particle-swarm view of the map (python -m go2_viz, http://localhost:8090)
+│   ├── __main__.py      # FastAPI: go2_map (ZMQ) or a PLY file → WebSocket
+│   └── static/          # three.js swarm renderer (index.html, viz.js)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
 ├── requirements_map.txt
+├── requirements_viz.txt
 └── CLAUDE.md
 ```
 
@@ -62,6 +66,9 @@ python -m go2_lidar
 # Live 3D map from the on-board SLAM (deps: pip install -r requirements_map.txt)
 # sends mapping/start; 'cli_client.py slam mapping/stop' saves and overwrites the robot's single map slot
 python -m go2_map
+
+# Particle-swarm view of the map (deps: pip install -r requirements_viz.txt)
+python -m go2_viz
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):
@@ -106,6 +113,11 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_MAP_FILTER` | `1` | Remove moving objects (people walking past) from the map |
 | `GO2_MAP_FILTER_CELL` | `0.1` | Cell size in metres of the occupancy grid used by the filter |
 | `GO2_MAP_PLY` | `go2_map_<timestamp>.ply` | Map file written on exit (`0` = off) |
+| `GO2_MAP_PUB_PORT` | `5560` | Port on which `go2_map` publishes the cleaned map |
+| `GO2_MAP_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_map` (for `go2_viz`) |
+| `GO2_VIZ_PLY` | — | Show this PLY file instead of the live map |
+| `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
+| `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
 
 ## ZMQ Protocol
 

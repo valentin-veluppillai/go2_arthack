@@ -195,7 +195,23 @@ Indoor ceilings would cover the map, so points more than 1.5 m above the robot's
 
 **Moving objects.** People walking past the robot would leave trails ("ghosts") in the map. `go2_map` keeps a 10 cm occupancy grid next to the map: every scan ray marks the space it passes through as free, so cells that were only briefly occupied are cleared again, while walls and furniture keep getting hit. Scan points that land in space seen free before are drawn in magenta as `world/moving`, which shows people while they are there. Turn the filter off with `GO2_MAP_FILTER=0`.
 
+**Map stream.** `go2_map` also publishes the cleaned map once per second on port 5560 as `[b"occupancy", meta_json, float32 xyz]` (meta: `stamp`, `count`, `voxel`, `z_ref`, `robot` pose) for other apps such as `go2_viz`.
+
 **PLY export.** When you stop `go2_map` with Ctrl+C it writes the whole map (moving objects removed, no ceiling cut) as a binary PLY with height colours, `go2_map_<timestamp>.ply` in the current directory. Set `GO2_MAP_PLY=path.ply` for a fixed name or `GO2_MAP_PLY=0` to skip it.
+
+### 7. Swarm Visualization
+
+`go2_viz` is a browser app that renders the occupancy map as a particle swarm and keeps rendering continuously while the map updates. Each particle is tied to a map point: a spring pulls it there, a time-varying flow field makes it drift, and now and then it hops to a point in the same or an adjacent 40 cm cell, so the swarm crawls over walls and objects. When a new map arrives, every particle gets a new target in the cell of its old one and about 10 % are sent to random spots of the new map, so the swarm stays put and grows into newly mapped areas instead of jumping.
+
+```bash
+pip install -r requirements_viz.txt
+python -m go2_viz                                  # live from go2_map (port 5560)
+GO2_VIZ_PLY=go2_map_20261024_173512.ply python -m go2_viz   # from a saved map, reloaded when the file changes
+```
+
+Open http://localhost:8090. The panel on the right changes the generation parameters live: particle count, spring strength, damping, flow field strength/scale/speed, how often particles hop, how many sit on the floor, point size, trail length, colour mode, ceiling cut and camera rotation. **Snapshot** saves the current frame as PNG, **Record** records the frame stream as WebM. The HUD shows the data source, link state, map size and how long ago the last map arrived.
+
+The server sends at most 80 000 points to the browser (`GO2_VIZ_MAX_POINTS`), thinned evenly so consecutive maps stay similar.
 
 ## ZMQ Protocol
 
@@ -303,6 +319,11 @@ All settings via environment variables:
 | `GO2_MAP_FILTER` | `1` | Remove moving objects (people walking past) from the map |
 | `GO2_MAP_FILTER_CELL` | `0.1` | Cell size in metres of the occupancy grid used by the filter |
 | `GO2_MAP_PLY` | `go2_map_<timestamp>.ply` | Map file written on exit (`0` = off) |
+| `GO2_MAP_PUB_PORT` | `5560` | Port on which `go2_map` publishes the cleaned map |
+| `GO2_MAP_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_map` (for `go2_viz`) |
+| `GO2_VIZ_PLY` | — | Show this PLY file instead of the live map |
+| `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
+| `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
 
 ## Writing Custom Clients
 
