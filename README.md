@@ -158,6 +158,24 @@ mcp dev go2_mcp/server.py
 }
 ```
 
+### 5. YOLO Object Detection
+
+`go2_yolo` subscribes to the camera stream, runs [Ultralytics YOLO](https://docs.ultralytics.com) on the newest frame, shows the annotated feed in a window and republishes the results on its own PUB socket (port 5557). It doesn't need the Unitree SDK, so it can run in any Python 3.9+ environment on a machine that can reach the bridge.
+
+```bash
+pip install -r requirements_yolo.txt
+python -m go2_yolo                          # window with annotated feed (q / Esc to quit)
+GO2_YOLO_SHOW=0 python -m go2_yolo          # headless, only publishes
+GO2_YOLO_DEVICE=mps python -m go2_yolo      # Apple GPU (use 0 for CUDA)
+```
+
+The model weights (`yolo11n.pt` by default) are downloaded on first run. Frames that arrive while a frame is being processed are dropped, so detection always runs on the latest image.
+
+| Topic (port 5557) | Payload |
+|-------|---------|
+| `camera_yolo` | Annotated JPEG bytes |
+| `detections` | JSON: `{"ts", "width", "height", "detections": [{"cls", "conf", "box": [x1, y1, x2, y2]}]}` |
+
 ## ZMQ Protocol
 
 ### Commands (REQ/REP — port 5555)
@@ -231,6 +249,11 @@ All settings via environment variables:
 | `GO2_BRIDGE_HOST` | `localhost` | Bridge host (for clients) |
 | `GO2_WEBAPP_HOST` | `0.0.0.0` | Web app bind address |
 | `GO2_WEBAPP_PORT` | `8080` | Web app port |
+| `GO2_YOLO_PUB_PORT` | `5557` | YOLO results PUB port |
+| `GO2_YOLO_MODEL` | `yolo11n.pt` | YOLO weights (name or path) |
+| `GO2_YOLO_CONF` | `0.4` | Detection confidence threshold |
+| `GO2_YOLO_DEVICE` | auto | Inference device (`cpu`, `mps`, `0`, …) |
+| `GO2_YOLO_SHOW` | `1` | Show the annotated feed in a window |
 
 ## Writing Custom Clients
 

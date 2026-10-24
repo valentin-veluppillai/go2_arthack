@@ -23,3 +23,6 @@ Thumbs.db
 # Misc
 *.jpg
 *.png
+
+# YOLO weights (downloaded on first run)
+*.pt

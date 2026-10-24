@@ -24,9 +24,12 @@ go2/
 ├── go2_mcp/             # MCP server (python -m go2_mcp)
 │   ├── server.py        # FastMCP tools → ZMQ bridge client
 │   └── __main__.py      # Entry point (stdio transport)
+├── go2_yolo/            # YOLO detection on the camera stream (python -m go2_yolo)
+│   └── __main__.py      # SUB camera → YOLO → window + PUB on port 5557
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
+├── requirements_yolo.txt
 └── CLAUDE.md
 ```
 
@@ -50,6 +53,9 @@ python -m go2_webapp
 
 # MCP server (for Claude Code / Claude Desktop)
 python -m go2_mcp
+
+# YOLO detection (separate deps: pip install -r requirements_yolo.txt)
+python -m go2_yolo
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):
