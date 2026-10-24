@@ -17,6 +17,8 @@ const HOP_CELL = 0.4; // m, neighbourhood for hops between map points
 const RESEED = 0.1;   // share of particles sent to a random spot of each new map, so new areas fill up
 const MAX_HOP = 0.5;  // m, longer hops are skipped so particles don't cross gaps
 const FADE_IN = 2.0;  // s, respawned particles fade in from the background
+const JITTER_RANGE = 0.06; // m, largest twitch offset at jitter = 1
+const JITTER_RATE = 0.35;  // chance per 1/60 s that a particle twitches to a new offset
 
 // base case: calm, low-contrast grayscale, few slow particles
 const params = {
@@ -27,6 +29,7 @@ const params = {
   noiseScale: 0.5,    // flow field spatial frequency (1/m)
   flowSpeed: 0.08,    // flow field time scale
   wander: 0.004,      // chance per frame to hop to a neighbouring map point
+  jitter: 0,          // erratic twitching in place: 0 = smooth, 1 = up to ±JITTER_RANGE per axis
   floorShare: 0.15,   // share of particles on the floor; the rest go to walls and objects
   size: 0.05,
   opacity: 0.55,
@@ -56,14 +59,16 @@ controls.enableDamping = true;
 
 // ── particles ────────────────────────────────────────────────────
 
-const positions = new Float32Array(MAX_PARTICLES * 3);
+const positions = new Float32Array(MAX_PARTICLES * 3);   // simulated
+const drawn = new Float32Array(MAX_PARTICLES * 3);       // simulated + jitter offset, rendered
+const jitterOffset = new Float32Array(MAX_PARTICLES * 3);
 const velocities = new Float32Array(MAX_PARTICLES * 3);
 const colors = new Float32Array(MAX_PARTICLES * 3);
 const targetIndex = new Int32Array(MAX_PARTICLES);
 const fade = new Float32Array(MAX_PARTICLES).fill(1); // 0 = background colour, 1 = fully visible
 
 const geometry = new THREE.BufferGeometry();
-geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+geometry.setAttribute("position", new THREE.BufferAttribute(drawn, 3).setUsage(THREE.DynamicDrawUsage));
 geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
 geometry.setDrawRange(0, 0);
 
@@ -270,6 +275,7 @@ function step(dt, time) {
   const s = params.noiseScale, t = time * params.flowSpeed;
   const keep = Math.pow(params.damping, dt * 60);
   const hop = params.wander * dt * 60;
+  const jitterAmp = params.jitter * JITTER_RANGE, twitch = JITTER_RATE * dt * 60;
 
   for (let i = 0; i < n; i++) {
     const p = i * 3;
@@ -293,6 +299,16 @@ function step(dt, time) {
     vx *= keep; vy *= keep; vz *= keep;
     velocities[p] = vx; velocities[p + 1] = vy; velocities[p + 2] = vz;
     positions[p] = px + vx * dt; positions[p + 1] = py + vy * dt; positions[p + 2] = pz + vz * dt;
+
+    // jitter only offsets the drawn position, so it never moves the particle away from its spot
+    if (jitterAmp > 0) {
+      if (Math.random() < twitch) {
+        for (let c = 0; c < 3; c++) jitterOffset[p + c] = (Math.random() * 2 - 1) * jitterAmp;
+      }
+      for (let c = 0; c < 3; c++) drawn[p + c] = positions[p + c] + jitterOffset[p + c];
+    } else {
+      drawn[p] = positions[p]; drawn[p + 1] = positions[p + 1]; drawn[p + 2] = positions[p + 2];
+    }
 
     const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
     const glow = 0.45 + Math.min(speed * 0.6, 1.2);
@@ -330,6 +346,7 @@ swarm.add(params, "noise", 0, 5, 0.05);
 swarm.add(params, "noiseScale", 0.05, 4, 0.05);
 swarm.add(params, "flowSpeed", 0, 3, 0.05);
 swarm.add(params, "wander", 0, 0.3, 0.005);
+swarm.add(params, "jitter", 0, 1, 0.01);
 swarm.add(params, "floorShare", 0, 1, 0.01).name("floor share").onChange(() => scatterParticles(0, MAX_PARTICLES));
 const look = gui.addFolder("Look");
 look.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.size = v; });

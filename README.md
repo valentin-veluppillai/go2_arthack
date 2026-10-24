@@ -209,7 +209,7 @@ python -m go2_viz                                  # live from go2_map (port 556
 GO2_VIZ_PLY=go2_map_20261024_173512.ply python -m go2_viz   # from a saved map, reloaded when the file changes
 ```
 
-Open http://localhost:8090. The base look is calm and low-contrast: 4 000 gray particles drifting slowly on a dark gray background, no trails. The panel on the right changes the generation parameters live: particle count, spring strength, damping, flow field strength/scale/speed, how often particles hop, how many sit on the floor, point size, opacity, colour mode (gray, height, speed, white), ceiling cut and camera rotation. **Snapshot** saves the current frame as PNG, **Record** records the frame stream as WebM. The HUD shows the data source, link state, map size and how long ago the last map arrived.
+Open http://localhost:8090. The base look is calm and low-contrast: 4 000 gray particles drifting slowly on a dark gray background, no trails. The panel on the right changes the generation parameters live: particle count, spring strength, damping, flow field strength/scale/speed, how often particles hop, jitter (erratic twitching in place, off by default), how many sit on the floor, point size, opacity, colour mode (gray, height, speed, white), ceiling cut and camera rotation. **Snapshot** saves the current frame as PNG, **Record** records the frame stream as WebM. The HUD shows the data source, link state, map size and how long ago the last map arrived.
 
 The server sends at most 80 000 points to the browser (`GO2_VIZ_MAX_POINTS`), thinned evenly so consecutive maps stay similar.
 
