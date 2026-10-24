@@ -5,6 +5,8 @@
 // it hops to a nearby map point, so the swarm crawls over the surfaces.
 // Particles that need to go somewhere far away never fly through empty
 // space: they are respawned at the new spot and fade in from the background.
+// Particles inside the robot's field of view (a cone at its head) take on
+// colour and slowly desaturate again after they leave it.
 // When a new map arrives, targets are swapped in place and the swarm flows to
 // the new geometry. Map coordinates are z-up; three.js is y-up.
 
@@ -19,6 +21,10 @@ const MAX_HOP = 0.5;  // m, longer hops are skipped so particles don't cross gap
 const FADE_IN = 2.0;  // s, respawned particles fade in from the background
 const JITTER_RANGE = 0.06; // m, largest twitch offset at jitter = 1
 const JITTER_RATE = 0.35;  // chance per 1/60 s that a particle twitches to a new offset
+const SATURATE = 0.4;      // s to reach full colour inside the field of view
+const HEAD_OFFSET = new THREE.Vector3(0.3, 0.1, 0); // robot head in its own frame (three.js axes: x forward, y up)
+// map frame (z up) → three.js frame (y up): -90° about x
+const MAP_TO_THREE = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
 
 // base case: calm, low-contrast grayscale, few slow particles
 const params = {
@@ -33,11 +39,16 @@ const params = {
   floorShare: 0.15,   // share of particles on the floor; the rest go to walls and objects
   size: 0.05,
   opacity: 0.55,
+  roughness: 0,       // particle shape: 0 = smooth soft disc, 1 = pointy, splintered cluster
   ceiling: 1.8,       // hide map points this far above the floor (m)
   colorMode: "gray",
   autoRotate: true,
   rotateSpeed: 0.15,
   showRobot: true,
+  showFov: true,
+  fov: 90,            // robot field of view, full cone angle (deg)
+  fovRange: 4,        // m
+  desaturate: 3,      // s for a particle to lose its colour after leaving the field of view
 };
 
 const BACKGROUND = 0x1a1b1e;
@@ -66,36 +77,100 @@ const velocities = new Float32Array(MAX_PARTICLES * 3);
 const colors = new Float32Array(MAX_PARTICLES * 3);
 const targetIndex = new Int32Array(MAX_PARTICLES);
 const fade = new Float32Array(MAX_PARTICLES).fill(1); // 0 = background colour, 1 = fully visible
+const saturation = new Float32Array(MAX_PARTICLES);   // 0 = gray, 1 = full colour (field of view)
 
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute("position", new THREE.BufferAttribute(drawn, 3).setUsage(THREE.DynamicDrawUsage));
 geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
+// per-particle random seed, so every particle gets its own spikes and splinters
+geometry.setAttribute("seed", new THREE.BufferAttribute(Float32Array.from({ length: MAX_PARTICLES }, Math.random), 1));
 geometry.setDrawRange(0, 0);
 
-function discTexture() {
-  const c = document.createElement("canvas");
-  c.width = c.height = 64;
-  const g = c.getContext("2d");
-  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-  grad.addColorStop(0, "rgba(255,255,255,1)");
-  grad.addColorStop(0.35, "rgba(255,255,255,0.6)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 64, 64);
-  return new THREE.CanvasTexture(c);
-}
-
-const material = new THREE.PointsMaterial({
-  size: params.size, map: discTexture(), vertexColors: true, transparent: true,
-  opacity: params.opacity, depthWrite: false, sizeAttenuation: true,
+// Point sprites drawn procedurally: at roughness 0 a soft round disc, towards 1 the
+// outline gets jagged spikes, the edge hardens and small splinters break off around it.
+const material = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  uniforms: {
+    size: { value: params.size },
+    scale: { value: 1 },          // half the drawing buffer height, for size attenuation
+    opacity: { value: params.opacity },
+    roughness: { value: params.roughness },
+  },
+  vertexShader: /* glsl */ `
+    attribute vec3 color;
+    attribute float seed;
+    uniform float size;
+    uniform float scale;
+    varying vec3 vColor;
+    varying float vSeed;
+    void main() {
+      vColor = color;
+      vSeed = seed;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = size * scale / -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */ `
+    uniform float opacity;
+    uniform float roughness;
+    varying vec3 vColor;
+    varying float vSeed;
+    void main() {
+      vec2 uv = gl_PointCoord * 2.0 - 1.0;
+      float d = length(uv);
+      float a = atan(uv.y, uv.x);
+      // jagged outline: two interfering angular waves, phase-shifted per particle
+      float spikes = 0.5 + 0.5 * sin(a * 5.0 + vSeed * 6.2832) * sin(a * 3.0 - vSeed * 17.0);
+      float edge = mix(1.0, 0.3 + 0.65 * pow(spikes, 2.5), roughness);
+      float soft = mix(1.0, 0.06, roughness);
+      float alpha = 1.0 - smoothstep(edge - soft, edge, d);
+      // splinters around the core
+      for (int k = 0; k < 3; k++) {
+        float fk = float(k);
+        float ang = vSeed * 40.0 + fk * 2.1;
+        float rad = 0.55 + 0.3 * fract(vSeed * 7.3 + fk * 0.37);
+        float r = 0.2 * roughness;
+        float frag = 1.0 - smoothstep(r * 0.4, r, length(uv - rad * vec2(cos(ang), sin(ang))));
+        alpha = max(alpha, roughness * frag);
+      }
+      if (alpha < 0.01) discard;
+      gl_FragColor = vec4(vColor, alpha * opacity);
+      #include <colorspace_fragment>
+    }`,
 });
 scene.add(new THREE.Points(geometry, material));
 
-const robot = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12),
-                             new THREE.MeshBasicMaterial({ color: 0x9a9da3 }));
+function updatePointScale() {
+  material.uniforms.scale.value = renderer.getDrawingBufferSize(new THREE.Vector2()).y / 2;
+}
+updatePointScale();
+
+const robot = new THREE.Group();
+robot.add(new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), new THREE.MeshBasicMaterial({ color: 0x9a9da3 })));
+const fovCone = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
+  color: 0x9a9da3, transparent: true, opacity: 0.06, depthWrite: false, side: THREE.DoubleSide,
+}));
+fovCone.position.copy(HEAD_OFFSET);
+robot.add(fovCone);
 robot.visible = false;
 scene.add(robot);
-const robotTarget = new THREE.Vector3(); // poses arrive once per second; the marker glides there
+
+function buildFovCone() {
+  const half = THREE.MathUtils.degToRad(params.fov / 2);
+  const cone = new THREE.ConeGeometry(params.fovRange * Math.tan(half), params.fovRange, 48, 1, true);
+  cone.translate(0, -params.fovRange / 2, 0); // apex at the head
+  cone.rotateZ(Math.PI / 2);                  // opening towards +x (forward)
+  fovCone.geometry.dispose();
+  fovCone.geometry = cone;
+}
+buildFovCone();
+
+// poses arrive once per second; the robot glides and turns towards the latest one
+const robotTarget = new THREE.Vector3();
+const robotQuatTarget = new THREE.Quaternion();
+let robotKnown = false;
+const head = new THREE.Vector3(), forward = new THREE.Vector3();
 
 // ── map / targets ────────────────────────────────────────────────
 
@@ -172,6 +247,7 @@ function respawn(i, t) {
     velocities[i * 3 + c] = 0;
   }
   fade[i] = 0;
+  saturation[i] = 0;
 }
 
 // random target, on the floor with probability floorShare
@@ -235,10 +311,14 @@ function onMap(header, xyz) {
   if (!hasFitView && targetCount) { fitView(); hasFitView = true; }
   if (header.robot) {
     const [x, y, z] = header.robot.position;
+    const [qx, qy, qz, qw] = header.robot.orientation;
     robotTarget.set(x, z, -y);
-    if (!robot.visible) robot.position.copy(robotTarget);
+    robotQuatTarget.copy(MAP_TO_THREE).multiply(new THREE.Quaternion(qx, qy, qz, qw))
+                   .multiply(MAP_TO_THREE.clone().invert());
+    if (!robotKnown) { robot.position.copy(robotTarget); robot.quaternion.copy(robotQuatTarget); }
   }
-  robot.visible = params.showRobot && !!header.robot;
+  robotKnown = !!header.robot;
+  robot.visible = params.showRobot && robotKnown;
   mapStats = { updates: mapStats.updates + 1, lastUpdate: performance.now(),
                source: header.source || "–", points: targetCount };
   document.getElementById("waiting").style.display = targetCount ? "none" : "grid";
@@ -277,6 +357,13 @@ function step(dt, time) {
   const hop = params.wander * dt * 60;
   const jitterAmp = params.jitter * JITTER_RANGE, twitch = JITTER_RATE * dt * 60;
 
+  // field of view: cone from the robot's head along its heading
+  head.copy(HEAD_OFFSET).applyQuaternion(robot.quaternion).add(robot.position);
+  forward.set(1, 0, 0).applyQuaternion(robot.quaternion);
+  const cosHalf = Math.cos(THREE.MathUtils.degToRad(params.fov / 2));
+  const range2 = params.fovRange * params.fovRange;
+  const gain = dt / SATURATE, loss = dt / params.desaturate;
+
   for (let i = 0; i < n; i++) {
     const p = i * 3;
     let ti = targetIndex[i];
@@ -310,6 +397,18 @@ function step(dt, time) {
       drawn[p] = positions[p]; drawn[p + 1] = positions[p + 1]; drawn[p + 2] = positions[p + 2];
     }
 
+    let sat = saturation[i];
+    if (robotKnown) {
+      const dx = drawn[p] - head.x, dy = drawn[p + 1] - head.y, dz = drawn[p + 2] - head.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      const along = dx * forward.x + dy * forward.y + dz * forward.z;
+      const inside = d2 < range2 && along > 0 && along * along >= cosHalf * cosHalf * d2;
+      sat = inside ? Math.min(1, sat + gain) : Math.max(0, sat - loss);
+    } else {
+      sat = Math.max(0, sat - loss);
+    }
+    saturation[i] = sat;
+
     const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
     const glow = 0.45 + Math.min(speed * 0.6, 1.2);
     if (params.colorMode === "height") {
@@ -317,7 +416,11 @@ function step(dt, time) {
     } else if (params.colorMode === "gray") {
       // narrow band of mid grays: slightly lighter higher up and when moving
       const h = (targetColors[q] + targetColors[q + 1] + targetColors[q + 2]) / 3;
-      colors[p] = colors[p + 1] = colors[p + 2] = 0.42 + 0.08 * h + Math.min(speed * 0.15, 0.06);
+      const g = 0.42 + 0.08 * h + Math.min(speed * 0.15, 0.06);
+      // seen by the robot: blend from gray to the height colour
+      colors[p] = g + (targetColors[q] * 0.9 - g) * sat;
+      colors[p + 1] = g + (targetColors[q + 1] * 0.9 - g) * sat;
+      colors[p + 2] = g + (targetColors[q + 2] * 0.9 - g) * sat;
     } else if (params.colorMode === "speed") {
       heightColor(Math.min(speed / 1.5, 1), colors, p);
     } else {
@@ -349,11 +452,17 @@ swarm.add(params, "wander", 0, 0.3, 0.005);
 swarm.add(params, "jitter", 0, 1, 0.01);
 swarm.add(params, "floorShare", 0, 1, 0.01).name("floor share").onChange(() => scatterParticles(0, MAX_PARTICLES));
 const look = gui.addFolder("Look");
-look.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.size = v; });
-look.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.opacity = v; });
+look.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.uniforms.size.value = v; });
+look.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.uniforms.opacity.value = v; });
+look.add(params, "roughness", 0, 1, 0.01).onChange((v) => { material.uniforms.roughness.value = v; });
 look.add(params, "colorMode", ["gray", "height", "speed", "white"]);
 look.add(params, "ceiling", 0.3, 5, 0.1).name("ceiling (m)").onChange(rebuildTargets);
-look.add(params, "showRobot").onChange((v) => { robot.visible = v && mapStats.updates > 0; });
+const robotFolder = gui.addFolder("Robot");
+robotFolder.add(params, "showRobot").onChange((v) => { robot.visible = v && robotKnown; });
+robotFolder.add(params, "showFov").name("show field of view").onChange((v) => { fovCone.visible = v; });
+robotFolder.add(params, "fov", 10, 170, 1).name("field of view (°)").onChange(buildFovCone);
+robotFolder.add(params, "fovRange", 0.5, 10, 0.1).name("view range (m)").onChange(buildFovCone);
+robotFolder.add(params, "desaturate", 0.2, 10, 0.1).name("desaturate (s)");
 const cam = gui.addFolder("Camera");
 cam.add(params, "autoRotate");
 cam.add(params, "rotateSpeed", -3, 3, 0.1);
@@ -409,6 +518,7 @@ function frame() {
   const dt = Math.min(clock.getDelta(), 1 / 20);
   step(dt, clock.elapsedTime);
   robot.position.lerp(robotTarget, 1 - Math.exp(-dt * 3));
+  robot.quaternion.slerp(robotQuatTarget, 1 - Math.exp(-dt * 3));
   controls.autoRotate = params.autoRotate;
   controls.autoRotateSpeed = params.rotateSpeed;
   controls.update();
@@ -419,8 +529,12 @@ function frame() {
 }
 frame();
 
+// handle for tweaking from the browser console, e.g. swarm.params.noise = 0.3
+window.swarm = { params, robot, fovCone, camera, controls, saturation, material };
+
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  updatePointScale();
 });
