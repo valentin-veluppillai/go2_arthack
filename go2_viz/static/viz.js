@@ -2,8 +2,9 @@
 //
 // Every particle is tied to one map point (its target). A spring pulls it
 // there, a time-varying flow field makes it drift around it, and now and then
-// it hops to a map point in the same or an adjacent grid cell, so the swarm
-// crawls over the surfaces.
+// it hops to a nearby map point, so the swarm crawls over the surfaces.
+// Particles that need to go somewhere far away never fly through empty
+// space: they are respawned at the new spot and fade in from the background.
 // When a new map arrives, targets are swapped in place and the swarm flows to
 // the new geometry. Map coordinates are z-up; three.js is y-up.
 
@@ -14,6 +15,8 @@ import GUI from "lil-gui";
 const MAX_PARTICLES = 60000;
 const HOP_CELL = 0.4; // m, neighbourhood for hops between map points
 const RESEED = 0.1;   // share of particles sent to a random spot of each new map, so new areas fill up
+const MAX_HOP = 0.5;  // m, longer hops are skipped so particles don't cross gaps
+const FADE_IN = 2.0;  // s, respawned particles fade in from the background
 
 // base case: calm, low-contrast grayscale, few slow particles
 const params = {
@@ -35,6 +38,7 @@ const params = {
 };
 
 const BACKGROUND = 0x1a1b1e;
+const BG = new THREE.Color(BACKGROUND); // linear RGB, same space as the vertex colours
 
 // ── renderer, camera ─────────────────────────────────────────────
 
@@ -56,6 +60,7 @@ const positions = new Float32Array(MAX_PARTICLES * 3);
 const velocities = new Float32Array(MAX_PARTICLES * 3);
 const colors = new Float32Array(MAX_PARTICLES * 3);
 const targetIndex = new Int32Array(MAX_PARTICLES);
+const fade = new Float32Array(MAX_PARTICLES).fill(1); // 0 = background colour, 1 = fully visible
 
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
@@ -149,8 +154,19 @@ function rebuildTargets() {
     const o = targetIndex[i] * 3;
     const members = Math.random() < RESEED ? null :
       cellMembers.get(cellKey(oldTargets[o], oldTargets[o + 1], oldTargets[o + 2], targetIndex[i] >= oldStructureCount));
-    targetIndex[i] = members ? members[Math.floor(Math.random() * members.length)] : pickTarget();
+    if (members) targetIndex[i] = members[Math.floor(Math.random() * members.length)];
+    else respawn(i, pickTarget());
   }
+}
+
+// put a particle straight onto target t (no flight) and let it fade in
+function respawn(i, t) {
+  targetIndex[i] = t;
+  for (let c = 0; c < 3; c++) {
+    positions[i * 3 + c] = targets[t * 3 + c] + (Math.random() - 0.5) * 0.1;
+    velocities[i * 3 + c] = 0;
+  }
+  fade[i] = 0;
 }
 
 // random target, on the floor with probability floorShare
@@ -179,24 +195,21 @@ function buildCells() {
   }
 }
 
-// random target in the same or an adjacent cell of the same part (structure or floor)
+// random target in the same or an adjacent cell of the same part (structure or floor),
+// or ti itself if that target is more than MAX_HOP away
 function neighbourTarget(ti) {
   const step = (Math.floor(Math.random() * 3) - 1) * 2 * 1024 * 1024    // x
              + (Math.floor(Math.random() * 3) - 1) * 2 * 1024           // y
              + (Math.floor(Math.random() * 3) - 1) * 2;                 // z
   const members = cellMembers.get(targetCell[ti] + step) || cellMembers.get(targetCell[ti]);
-  return members[Math.floor(Math.random() * members.length)];
+  const tj = members[Math.floor(Math.random() * members.length)];
+  const dx = targets[tj * 3] - targets[ti * 3], dy = targets[tj * 3 + 1] - targets[ti * 3 + 1],
+        dz = targets[tj * 3 + 2] - targets[ti * 3 + 2];
+  return dx * dx + dy * dy + dz * dz <= MAX_HOP * MAX_HOP ? tj : ti;
 }
 
 function scatterParticles(from, to) {
-  for (let i = from; i < to; i++) {
-    const t = pickTarget();
-    targetIndex[i] = t;
-    for (let c = 0; c < 3; c++) {
-      positions[i * 3 + c] = targets[t * 3 + c] + (Math.random() - 0.5) * 0.5;
-      velocities[i * 3 + c] = 0;
-    }
-  }
+  for (let i = from; i < to; i++) respawn(i, pickTarget());
 }
 
 function fitView() {
@@ -262,9 +275,10 @@ function step(dt, time) {
     const p = i * 3;
     let ti = targetIndex[i];
     if (Math.random() < hop) {
-      // mostly hop to a neighbour (map points are spatially sorted), sometimes jump anywhere
-      ti = Math.random() < 0.02 ? pickTarget() : neighbourTarget(ti);
-      targetIndex[i] = ti;
+      // mostly hop to a nearby point, sometimes reappear somewhere else
+      if (Math.random() < 0.02) respawn(i, pickTarget());
+      else targetIndex[i] = neighbourTarget(ti);
+      ti = targetIndex[i];
     }
     const q = ti * 3;
     const px = positions[p], py = positions[p + 1], pz = positions[p + 2];
@@ -292,6 +306,13 @@ function step(dt, time) {
       heightColor(Math.min(speed / 1.5, 1), colors, p);
     } else {
       colors[p] = colors[p + 1] = colors[p + 2] = 0.55 * glow;
+    }
+    if (fade[i] < 1) {
+      const f = fade[i];
+      colors[p] = BG.r + (colors[p] - BG.r) * f;
+      colors[p + 1] = BG.g + (colors[p + 1] - BG.g) * f;
+      colors[p + 2] = BG.b + (colors[p + 2] - BG.b) * f;
+      fade[i] = Math.min(1, f + dt / FADE_IN);
     }
   }
   geometry.attributes.position.needsUpdate = true;
