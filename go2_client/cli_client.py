@@ -10,6 +10,7 @@ Usage:
     python go2_client/cli_client.py camera_frame          # saves one JPEG
     python go2_client/cli_client.py obstacle_avoidance 1
     python go2_client/cli_client.py speed_level 2
+    python go2_client/cli_client.py slam mapping/start    # any uslam command
 """
 
 from __future__ import annotations
@@ -96,6 +97,11 @@ def main() -> None:
     elif subcmd == "speed_level":
         level = int(sys.argv[2]) if len(sys.argv) > 2 else 1
         resp = send_command("speed_level", {"level": level})
+    elif subcmd == "slam":
+        if len(sys.argv) < 3:
+            print("Usage: cli_client.py slam <module/action>   e.g. mapping/start, mapping/stop")
+            sys.exit(1)
+        resp = send_command("slam", {"command": sys.argv[2]})
     else:
         print(f"Unknown subcommand: {subcmd}")
         sys.exit(1)

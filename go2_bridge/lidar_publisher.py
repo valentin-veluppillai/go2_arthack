@@ -13,6 +13,7 @@ from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 
 from . import config
+from .protocol import cloud_meta
 
 log = logging.getLogger(__name__)
 
@@ -82,22 +83,8 @@ class LidarPublisher:
                 self._new.clear()
 
             try:
-                meta = {
-                    "stamp": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
-                    "frame_id": msg.header.frame_id,
-                    "width": msg.width,
-                    "height": msg.height,
-                    "point_step": msg.point_step,
-                    "row_step": msg.row_step,
-                    "is_bigendian": msg.is_bigendian,
-                    "is_dense": msg.is_dense,
-                    "fields": [
-                        {"name": f.name, "offset": f.offset, "datatype": f.datatype, "count": f.count}
-                        for f in msg.fields
-                    ],
-                }
-                data = bytes(msg.data)
-                pub.send_multipart([b"lidar", json.dumps(meta).encode(), data])
+                meta = cloud_meta(msg)
+                pub.send_multipart([b"lidar", json.dumps(meta).encode(), bytes(msg.data)])
 
                 if first:
                     first = False

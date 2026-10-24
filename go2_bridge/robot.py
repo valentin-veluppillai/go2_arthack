@@ -5,13 +5,15 @@ from __future__ import annotations
 import logging
 import time
 
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2py.go2.obstacles_avoid.obstacles_avoid_client import (
     ObstaclesAvoidClient,
 )
 from unitree_sdk2py.go2.video.video_client import VideoClient
 from unitree_sdk2py.go2.vui.vui_client import VuiClient
+from unitree_sdk2py.idl.default import std_msgs_msg_dds__String_
+from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 
 from . import config
 
@@ -26,6 +28,7 @@ class Robot:
         self.obstacles: ObstaclesAvoidClient | None = None
         self.video: VideoClient | None = None
         self.vui: VuiClient | None = None
+        self._uslam_cmd: ChannelPublisher | None = None
         self.obstacle_avoidance_enabled: bool = config.OBSTACLE_AVOIDANCE
         self._speed_level: int = 1  # 1 = normal
         self._light_on: bool = False
@@ -63,6 +66,10 @@ class Robot:
         self.vui.SetTimeout(3.0)
         self.vui.Init()
         log.info("VuiClient ready")
+
+        # uSLAM command channel (plain "module/action" strings)
+        self._uslam_cmd = ChannelPublisher("rt/uslam/client_command", String_)
+        self._uslam_cmd.Init()
 
     def shutdown(self) -> None:
         """Clean up: zero velocity, disable remote API control."""
@@ -138,6 +145,14 @@ class Robot:
     def get_image(self) -> tuple[int, bytes]:
         """Return (code, jpeg_bytes)."""
         return self.video.GetImageSample()
+
+    # ── SLAM ──────────────────────────────────────────────────────
+
+    def uslam_command(self, command: str) -> None:
+        """Send a uslam_server command such as "mapping/start". Acks arrive on the server log."""
+        msg = std_msgs_msg_dds__String_()
+        msg.data = command
+        self._uslam_cmd.Write(msg)
 
     # ── speed level ───────────────────────────────────────────────
 

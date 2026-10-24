@@ -15,6 +15,7 @@ go2/
 │   ├── movement_loop.py # 20 Hz heartbeat thread with 250ms timeout safety
 │   ├── camera_publisher.py  # Camera JPEG → ZMQ PUB thread
 │   ├── lidar_publisher.py   # LiDAR PointCloud2 (DDS) → ZMQ PUB thread (port 5558)
+│   ├── slam_publisher.py    # uslam scans/pose/log (DDS) → ZMQ PUB thread (port 5559)
 │   ├── command_handler.py   # ZMQ REQ/REP command dispatcher
 │   └── __main__.py      # Entry point, wires components, graceful shutdown
 ├── go2_client/
@@ -26,11 +27,11 @@ go2/
 │   ├── server.py        # FastMCP tools → ZMQ bridge client
 │   └── __main__.py      # Entry point (stdio transport)
 ├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
-│   └── depth.py         # Front-view depth image from the point cloud (python -m go2_lidar.depth)
+├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
-├── requirements_lidar.txt
+├── requirements_map.txt
 └── CLAUDE.md
 ```
 
@@ -58,8 +59,9 @@ python -m go2_mcp
 # LiDAR subscriber (logs point counts)
 python -m go2_lidar
 
-# LiDAR depth image (deps: pip install -r requirements_lidar.txt)
-python -m go2_lidar.depth
+# Live 3D map from the on-board SLAM (deps: pip install -r requirements_map.txt)
+# sends mapping/start; 'cli_client.py slam mapping/stop' saves and overwrites the robot's single map slot
+python -m go2_map
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):
@@ -94,15 +96,13 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
 | `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
 | `GO2_ZMQ_LIDAR_PORT` | `5558` | LiDAR PUB/SUB port |
-| `GO2_LIDAR_MOUNT` | `0.28945 0 -0.046825 0 2.8782 0` | LiDAR → body transform `x y z roll pitch yaw` (URDF `radar_joint`) |
-| `GO2_DEPTH_CAMERA_POS` | `0.32715 0 0.04297` | Virtual camera position in the body frame (URDF front camera) |
-| `GO2_DEPTH_WIDTH` / `GO2_DEPTH_HEIGHT` | `320` / `180` | Depth image size in pixels |
-| `GO2_DEPTH_HFOV` | `90` | Horizontal field of view in degrees |
-| `GO2_DEPTH_MAX_RANGE` | `10` | Depth in metres mapped to the coldest colour |
-| `GO2_DEPTH_ACCUMULATE` | `20` | Number of recent clouds merged into one image |
-| `GO2_DEPTH_FILL` | `9` | Largest window used to fill empty pixels (0 = off) |
-| `GO2_DEPTH_SHOW` | `1` | Show the depth image in a window |
-| `GO2_DEPTH_SAVE` | — | Save the image to this path once per second |
+| `GO2_SLAM` | `1` | Forward the on-board SLAM (uslam) streams in the bridge |
+| `GO2_ZMQ_SLAM_PORT` | `5559` | SLAM PUB/SUB port |
+| `GO2_MAP_VOXEL` | `0.05` | Map resolution in metres (one point per voxel) |
+| `GO2_MAP_CEILING` | `1.5` | Hide points this far above the robot's start height (0 = show all) |
+| `GO2_MAP_START` | `1` | `go2_map` sends `mapping/start` at startup |
+| `GO2_MAP_WEB` | `0` | Open the viewer in the browser instead of the native Rerun window |
+| `GO2_MAP_SAVE` | — | Record to this `.rrd` file instead of showing a viewer |
 
 ## ZMQ Protocol
 
@@ -137,7 +137,7 @@ Commands go over REQ/REP (port 5555). Streams go over PUB/SUB (port 5556).
 
 ## Architecture Conventions
 
-- Bridge components are started as daemon threads (movement_loop, camera_publisher, command_handler, lidar_publisher)
+- Bridge components are started as daemon threads (movement_loop, camera_publisher, command_handler, lidar_publisher, slam_publisher)
 - Movement safety: 20 Hz heartbeat relays last velocity; 250ms timeout zeros velocity automatically
 - Graceful shutdown via SIGINT/SIGTERM: zeros velocity, disables remote API control, terminates ZMQ context
 - Web app uses async ZMQ (`zmq.asyncio`) for non-blocking bridge communication

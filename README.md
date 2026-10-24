@@ -20,7 +20,7 @@ A reusable interface layer for the Unitree Go2 quadruped robot. A ZeroMQ bridge 
 └─────────────┘                  └──────────────────┘
 ```
 
-**go2_bridge** runs four threads:
+**go2_bridge** runs five threads:
 
 | Thread | Purpose | Rate |
 |--------|---------|------|
@@ -28,6 +28,7 @@ A reusable interface layer for the Unitree Go2 quadruped robot. A ZeroMQ bridge 
 | **movement_loop** | Relays last commanded velocity to the robot via SDK | 20 Hz |
 | **camera_publisher** | Grabs JPEG frames from VideoClient, publishes on ZMQ PUB port 5556 | 10 FPS |
 | **lidar_publisher** | Subscribes to the LiDAR `PointCloud2` DDS topic, publishes on ZMQ PUB port 5558 | ~15 Hz (sensor rate) |
+| **slam_publisher** | Forwards the on-board SLAM (uslam) map-frame scans, pose and log on ZMQ PUB port 5559 | ~5 Hz scans while mapping |
 
 ### Movement Safety
 
@@ -171,15 +172,26 @@ python -m go2_lidar
 
 It only needs `pyzmq`, so it can run on any machine that can reach the bridge.
 
-`go2_lidar.depth` renders the stream as a front-view depth image, as seen from the front camera: each pixel is the forward distance of the nearest LiDAR point. Near is red, far is blue, no return is black. The L1 is mounted almost upside down in the chin (URDF `radar_joint`, pitch ≈ 165°), so points are first transformed into the body frame. The L1 is also sparse (roughly 1–2k points per scan, most outside the front view), so the image is kept small (320 × 180), the last 20 clouds (~1.3 s) are merged and empty pixels are filled from their nearest neighbours.
+### 6. Live 3D Map (uSLAM)
+
+The Go2 runs its own SLAM (`uslam_server`) on board. The bridge forwards its world-frame scans, the robot pose and its log on port 5559, and `go2_map` merges every scan into one map and shows it live in a [Rerun](https://rerun.io) 3D viewer, together with the robot, its path and the current scan. The map keeps everything seen so far, so the whole area around the robot is visible; orbit with the mouse, the view fits the whole map.
 
 ```bash
-pip install -r requirements_lidar.txt
-python -m go2_lidar.depth                                # window (q / Esc to quit)
-GO2_DEPTH_SHOW=0 GO2_DEPTH_SAVE=depth.png python -m go2_lidar.depth
+pip install -r requirements_map.txt
+python -m go2_map                    # sends mapping/start, opens the viewer
+GO2_MAP_WEB=1 python -m go2_map      # viewer in the browser instead
 ```
 
-With `GO2_DEPTH_SAVE` it writes the colourised image and a 16-bit depth PNG in millimetres (`depth_mm.png`) once per second.
+uslam only publishes while it is mapping (or localized on a saved map), so `go2_map` sends `mapping/start` when it starts (`GO2_MAP_START=0` to skip). Mapping keeps running after `go2_map` exits. Commands can also be sent by hand:
+
+```bash
+python go2_client/cli_client.py slam mapping/start
+python go2_client/cli_client.py slam mapping/stop    # saves the map on the robot
+```
+
+> **Note:** the robot has a single map slot. `mapping/stop` saves the new map there and **overwrites the previously saved map** (used for localization / navigation in the Unitree app).
+
+Indoor ceilings would cover the map, so points more than 1.5 m above the robot's start height are hidden in the viewer (`GO2_MAP_CEILING`).
 
 ## ZMQ Protocol
 
@@ -205,6 +217,7 @@ Response format:
 | `obstacle_avoidance` | `{"enabled": true}` | Toggle obstacle avoidance |
 | `speed_level` | `{"level": 2}` | Set speed (1-3) |
 | `light` | `{"on": true}` | Turn head light on/off |
+| `slam` | `{"command": "mapping/start"}` | Send a command to the on-board SLAM (uslam) |
 | `list_actions` | — | Get list of available actions |
 | `status` | — | Get current bridge status |
 
@@ -223,6 +236,16 @@ Subscribe with topic filter `b"camera"`. Frames arrive as two-part multipart mes
 | `lidar` | `[topic, meta_json, point_data]` | ~15 Hz |
 
 `meta_json` carries the PointCloud2 header: `stamp`, `frame_id`, `width`, `height`, `point_step`, `row_step`, `is_bigendian`, `is_dense` and `fields` (`name`, `offset`, `datatype`, `count`). `point_data` is the raw PointCloud2 data buffer (`width × height × point_step` bytes), so it can be turned into a NumPy structured array with the field offsets.
+
+### SLAM Stream (PUB/SUB — port 5559)
+
+| Topic | Payload | Source (DDS) |
+|-------|---------|--------------|
+| `slam_cloud` | `[topic, meta_json, point_data]`, PointCloud2 in the map frame | `rt/uslam/frontend/cloud_world_ds` (mapping), `rt/uslam/localization/cloud_world` (localized) |
+| `slam_odom` | JSON `{"stamp", "frame_id", "position": [x, y, z], "orientation": [x, y, z, w]}` | `rt/uslam/frontend/odom`, `rt/uslam/localization/odom` |
+| `slam_log` | UTF-8 text, e.g. `mapping/start/success` | `rt/uslam/server_log` |
+
+The `slam` command (`{"cmd": "slam", "params": {"command": "mapping/start"}}`) publishes any uslam command string on `rt/uslam/client_command`; see [unitree_ui's SLAM notes](https://github.com/legion1581/unitree_ui/blob/main/docs/slam.md) for the command set.
 
 ## Available Actions
 
@@ -266,15 +289,13 @@ All settings via environment variables:
 | `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
 | `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
 | `GO2_ZMQ_LIDAR_PORT` | `5558` | LiDAR PUB/SUB port |
-| `GO2_LIDAR_MOUNT` | `0.28945 0 -0.046825 0 2.8782 0` | LiDAR → body transform `x y z roll pitch yaw` (URDF `radar_joint`) |
-| `GO2_DEPTH_CAMERA_POS` | `0.32715 0 0.04297` | Virtual camera position in the body frame (URDF front camera) |
-| `GO2_DEPTH_WIDTH` / `GO2_DEPTH_HEIGHT` | `320` / `180` | Depth image size in pixels |
-| `GO2_DEPTH_HFOV` | `90` | Horizontal field of view in degrees |
-| `GO2_DEPTH_MAX_RANGE` | `10` | Depth in metres mapped to the coldest colour |
-| `GO2_DEPTH_ACCUMULATE` | `20` | Number of recent clouds merged into one image |
-| `GO2_DEPTH_FILL` | `9` | Largest window used to fill empty pixels (0 = off) |
-| `GO2_DEPTH_SHOW` | `1` | Show the depth image in a window |
-| `GO2_DEPTH_SAVE` | — | Save the image to this path once per second |
+| `GO2_SLAM` | `1` | Forward the on-board SLAM (uslam) streams in the bridge |
+| `GO2_ZMQ_SLAM_PORT` | `5559` | SLAM PUB/SUB port |
+| `GO2_MAP_VOXEL` | `0.05` | Map resolution in metres (one point per voxel) |
+| `GO2_MAP_CEILING` | `1.5` | Hide points this far above the robot's start height (0 = show all) |
+| `GO2_MAP_START` | `1` | `go2_map` sends `mapping/start` at startup |
+| `GO2_MAP_WEB` | `0` | Open the viewer in the browser instead of the native Rerun window |
+| `GO2_MAP_SAVE` | — | Record to this `.rrd` file instead of showing a viewer |
 
 ## Writing Custom Clients
 

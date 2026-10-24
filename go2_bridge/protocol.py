@@ -27,6 +27,24 @@ ACTION_REGISTRY: dict[str, tuple[str, tuple, dict]] = {
 }
 
 
+def cloud_meta(msg: Any) -> dict[str, Any]:
+    """PointCloud2 header as a JSON-able dict; sent next to the raw data buffer."""
+    return {
+        "stamp": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+        "frame_id": msg.header.frame_id,
+        "width": msg.width,
+        "height": msg.height,
+        "point_step": msg.point_step,
+        "row_step": msg.row_step,
+        "is_bigendian": msg.is_bigendian,
+        "is_dense": msg.is_dense,
+        "fields": [
+            {"name": f.name, "offset": f.offset, "datatype": f.datatype, "count": f.count}
+            for f in msg.fields
+        ],
+    }
+
+
 def make_request(cmd: str, params: dict[str, Any] | None = None) -> bytes:
     """Encode a command request as JSON bytes."""
     msg: dict[str, Any] = {"cmd": cmd}

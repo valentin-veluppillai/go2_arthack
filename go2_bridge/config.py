@@ -18,6 +18,9 @@ LIDAR_TOPIC: str = os.getenv("GO2_LIDAR_TOPIC", "rt/utlidar/cloud")
 LIDAR_SWITCH_ON: bool = os.getenv("GO2_LIDAR_SWITCH_ON", "1") == "1"
 ZMQ_LIDAR_PORT: int = int(os.getenv("GO2_ZMQ_LIDAR_PORT", "5558"))
 
+SLAM_ENABLED: bool = os.getenv("GO2_SLAM", "1") == "1"
+ZMQ_SLAM_PORT: int = int(os.getenv("GO2_ZMQ_SLAM_PORT", "5559"))
+
 OBSTACLE_AVOIDANCE: bool = os.getenv("GO2_OBSTACLE_AVOIDANCE", "1") == "1"
 
 BRIDGE_HOST: str = os.getenv("GO2_BRIDGE_HOST", "localhost")

@@ -73,6 +73,8 @@ class CommandHandler:
             return self._handle_list_actions()
         if cmd == "status":
             return self._handle_status()
+        if cmd == "slam":
+            return self._handle_slam(params)
         return make_response(False, f"unknown command: {cmd}")
 
     # ── handlers ──────────────────────────────────────────────────
@@ -125,6 +127,13 @@ class CommandHandler:
 
     def _handle_list_actions(self) -> bytes:
         return make_response(True, "actions", {"actions": list(ACTION_REGISTRY.keys())})
+
+    def _handle_slam(self, params: dict) -> bytes:
+        command = str(params.get("command", ""))
+        if command.count("/") < 1:
+            return make_response(False, "expected a uslam command like 'mapping/start'")
+        self._robot.uslam_command(command)
+        return make_response(True, f"sent uslam command {command} (ack on the SLAM log stream)")
 
     def _handle_status(self) -> bytes:
         return make_response(True, "ok", {
