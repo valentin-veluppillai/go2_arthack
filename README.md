@@ -160,7 +160,7 @@ mcp dev go2_mcp/server.py
 }
 ```
 
-<<<<<<< HEAD
+
 ### 5. LiDAR Subscriber
 
 The bridge forwards the Go2's LiDAR point cloud (`rt/utlidar/cloud`, `sensor_msgs/PointCloud2`) on port 5558. `go2_lidar` subscribes to it and logs how many points arrive, which is a quick way to check the LiDAR is reachable:
@@ -192,13 +192,17 @@ python go2_client/cli_client.py slam mapping/stop    # saves the map on the robo
 
 > **Note:** the robot has a single map slot. `mapping/stop` saves the new map there and **overwrites the previously saved map** (used for localization / navigation in the Unitree app).
 
+The live viewer only keeps the latest map, scan and robot pose (no timeline to scrub back), so its memory stays bounded over long sessions; it is capped at 1 GB (`GO2_MAP_VIEWER_MEMORY`). A `.rrd` recording made with `GO2_MAP_SAVE` keeps the full history.
+
 Indoor ceilings would cover the map, so points more than 1.5 m above the robot's start height are hidden in the viewer (`GO2_MAP_CEILING`).
 
 **Moving objects.** People walking past the robot would leave trails ("ghosts") in the map. `go2_map` keeps a 10 cm occupancy grid next to the map: every scan ray marks the space it passes through as free, so cells that were only briefly occupied are cleared again, while walls and furniture keep getting hit. Scan points that land in space seen free before are drawn in magenta as `world/moving`, which shows people while they are there. Turn the filter off with `GO2_MAP_FILTER=0`.
 
+**Map stream.** `go2_map` also publishes the cleaned map once per second on port 5560 as `[b"occupancy", meta_json, float32 xyz]` (meta: `stamp`, `count`, `voxel`, `z_ref`, `robot` pose) for other apps such as `go2_viz`.
+
 **PLY export.** When you stop `go2_map` with Ctrl+C it writes the whole map (moving objects removed, no ceiling cut) as a binary PLY with height colours, `go2_map_<timestamp>.ply` in the current directory. Set `GO2_MAP_PLY=path.ply` for a fixed name or `GO2_MAP_PLY=0` to skip it.
 =======
-### 5. YOLO Object Detection
+### 7. YOLO Object Detection
 
 `go2_yolo` subscribes to the camera stream, runs [Ultralytics YOLO](https://docs.ultralytics.com) on the newest frame, shows the annotated feed in a window and republishes the results on its own PUB socket (port 5557). It doesn't need the Unitree SDK, so it can run in any Python 3.9+ environment on a machine that can reach the bridge.
 
@@ -216,7 +220,7 @@ The model weights (`yolo11n.pt` by default) are downloaded on first run. Frames 
 | `camera_yolo` | Annotated JPEG bytes |
 | `detections` | JSON: `{"ts", "width", "height", "detections": [{"cls", "conf", "box": [x1, y1, x2, y2]}]}` |
 
-### 6. Person Follow
+### 8. Person Follow
 
 `go2_follow` keeps a person in the camera frame using the YOLO detections. It picks the largest person and applies two simple rules:
 
@@ -233,7 +237,53 @@ python -m go2_follow                               # terminal 3: hold SPACE to f
 ```
 
 The window shows the annotated camera feed, the turn zones (yellow lines) and the current command. Obstacle avoidance stays active if it is enabled in the bridge.
->>>>>>> person-follow
+
+### 9. Co-Creation Visualization
+
+`go2_viz` is a browser app that renders the room from the occupancy map as particles and keeps rendering continuously while the map and the human/robot inputs change. It implements the human–robodog co-creation spec:
+
+| Input | Range | Visual effect |
+|-------|-------|---------------|
+| Human–robot **distance** | 0.3 – 5 m | **Jitter** ∝ 1/d², normalised to 1 at ≤ 1 m and 0 at ≥ 3 m: vibration along the surface normals; below 1 m some particles also tear off the surface for a frame |
+| Human **movement / velocity** | 0 – 1 | **Density in the view cone**: focus particles ×1 (sparse trickle) to ×15 (burst) |
+| Interaction **entropy** | 0 – 1 | **Dispersion** of the focus particles: on the surface at 0, an aerosol cloud up to 0.5 m off the surfaces at 1 |
+| Posture **confidence** | 0 – 1 | **Saturation** of the in-cone colouring: monochrome at 0, full colour at 1 |
+| Perceived human **scale** | 0 – 1 | Share of particles drawn as **diamond / crosshair** markers instead of circles |
+| Head **yaw / pitch**, **cone angle** | °, 15 – 90° | **Zone of interest**: particles inside the cone take on a faked time-of-flight colour (viridis by distance from the head); outside they decay back to gray |
+
+How it works: a calm **base pool** of particles covers the whole room. A second **focus pool** only takes spots inside the view cone; its size is the number of map points in the cone × focus density × (1 + 14 · velocity), so the cone gets denser with movement whether it is narrow or wide. When the cone moves, focus particles whose spot drops out fade out and reappear inside the cone, so nothing flies through empty space. Surface normals for jitter and dispersion are computed on the server (PCA over each point's 12 nearest neighbours).
+
+```bash
+pip install -r requirements_viz.txt
+python -m go2_viz                                  # live from go2_map (port 5560)
+GO2_VIZ_PLY=go2_map_20261024_173512.ply python -m go2_viz   # from a saved map, reloaded when the file changes
+```
+
+Open http://localhost:8090. The panel has the test controls from the spec: **Human** (distance, gesture velocity, posture confidence, detected scale, bearing) and **Robot & canvas** (head yaw/pitch, cone angle, head tracks human, entropy). A simulated human (a translucent column) stands at the given distance and bearing; with *head tracks human* the head turns towards it. Without a robot pose (e.g. a PLY file) a virtual robot stands in the middle of the map. The swarm's own behaviour (base particles, focus density, spring, flow drift, hops, size, opacity, colours, view range, desaturation time, marker changes, camera) is in the collapsed **Tuning** folder. The HUD shows the data source, robot source, points and focus particles in the cone, and the current mapping (jitter, dispersion, saturation, marker share). **Snapshot** saves the current frame as PNG, **Record** records the frame stream as WebM.
+
+The server sends at most 80 000 points to the browser (`GO2_VIZ_MAX_POINTS`), thinned evenly so consecutive maps stay similar.
+
+**Driving it from robot data.** `go2_viz` binds a ZMQ SUB socket on port 5561 (`GO2_VIZ_PARAM_PORT`). Any number of processes can connect a PUB socket to it and send `[b"viz", json]` with any subset of the inputs; browsers ease into new numbers over about half a second, so noisy sensor data doesn't flicker:
+
+| Key | Range | Meaning |
+|-----|-------|---------|
+| `distance` | 0.3 – 5 | Human–robot distance (m) |
+| `velocity` | 0 – 1 | Human movement |
+| `entropy` | 0 – 1 | Interaction entropy |
+| `confidence` | 0 – 1 | Posture confidence |
+| `scale` | 0 – 1 | Perceived human scale |
+| `headYaw`, `headPitch` | °, ±180 / ±60 | Head direction relative to the body |
+| `coneAngle` | 15 – 90 | View cone, full angle (°) |
+| `trackHuman` | `true` / `false` | Head follows the human |
+| `humanBearing` | ±180 | Direction of the human relative to the body (°) |
+
+```python
+pub = zmq.Context().socket(zmq.PUB)
+pub.connect("tcp://localhost:5561")
+pub.send_multipart([b"viz", json.dumps({"distance": 0.8, "velocity": 0.6}).encode()])
+```
+
+For testing from the shell: `python -m go2_viz.send distance=0.6 velocity=0.8 entropy=0.3 confidence=0.9 scale=0.7`. Unknown keys are ignored (and logged); the last values are also sent to browsers that connect later. The HUD shows when inputs last arrived.
 
 ## ZMQ Protocol
 
@@ -327,7 +377,6 @@ All settings via environment variables:
 | `GO2_BRIDGE_HOST` | `localhost` | Bridge host (for clients) |
 | `GO2_WEBAPP_HOST` | `0.0.0.0` | Web app bind address |
 | `GO2_WEBAPP_PORT` | `8080` | Web app port |
-<<<<<<< HEAD
 | `GO2_LIDAR` | `1` | Enable the LiDAR publisher in the bridge |
 | `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
 | `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
@@ -339,10 +388,10 @@ All settings via environment variables:
 | `GO2_MAP_START` | `1` | `go2_map` sends `mapping/start` at startup |
 | `GO2_MAP_WEB` | `0` | Open the viewer in the browser instead of the native Rerun window |
 | `GO2_MAP_SAVE` | — | Record to this `.rrd` file instead of showing a viewer |
+| `GO2_MAP_VIEWER_MEMORY` | `1GB` | Memory cap of the live Rerun viewer |
 | `GO2_MAP_FILTER` | `1` | Remove moving objects (people walking past) from the map |
 | `GO2_MAP_FILTER_CELL` | `0.1` | Cell size in metres of the occupancy grid used by the filter |
 | `GO2_MAP_PLY` | `go2_map_<timestamp>.ply` | Map file written on exit (`0` = off) |
-=======
 | `GO2_YOLO_PUB_PORT` | `5557` | YOLO results PUB port |
 | `GO2_YOLO_MODEL` | `yolo11n.pt` | YOLO weights (name or path) |
 | `GO2_YOLO_CONF` | `0.4` | Detection confidence threshold |
@@ -355,7 +404,12 @@ All settings via environment variables:
 | `GO2_FOLLOW_VX` | `0.3` | Forward/backward speed (m/s) |
 | `GO2_FOLLOW_VYAW` | `0.6` | Turn speed (rad/s) |
 | `GO2_FOLLOW_CONF` | `0.5` | Minimum confidence for a person detection |
->>>>>>> person-follow
+| `GO2_MAP_PUB_PORT` | `5560` | Port on which `go2_map` publishes the cleaned map |
+| `GO2_MAP_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_map` (for `go2_viz`) |
+| `GO2_VIZ_PLY` | — | Show this PLY file instead of the live map |
+| `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
+| `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
+| `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives human/robot inputs from robot-data publishers |
 
 ## Writing Custom Clients
 

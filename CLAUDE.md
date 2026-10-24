@@ -26,14 +26,16 @@ go2/
 ├── go2_mcp/             # MCP server (python -m go2_mcp)
 │   ├── server.py        # FastMCP tools → ZMQ bridge client
 │   └── __main__.py      # Entry point (stdio transport)
-<<<<<<< HEAD
 ├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
-├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map)
+├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map), PUB on port 5560
+├── go2_viz/             # Human–robodog co-creation view of the map (python -m go2_viz, http://localhost:8090)
+│   ├── __main__.py      # FastAPI: go2_map (ZMQ) or a PLY file + surface normals → WebSocket; inputs SUB on 5561
+│   ├── send.py          # CLI to send inputs (python -m go2_viz.send distance=0.6 velocity=0.8 …)
+│   └── static/          # three.js renderer: base + focus particle pools, input → visual mapping (viz.js)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
 ├── requirements_map.txt
-=======
 ├── go2_yolo/            # YOLO detection on the camera stream (python -m go2_yolo)
 │   └── __main__.py      # SUB camera → YOLO → window + PUB on port 5557
 ├── go2_follow/          # Keep a person in frame from YOLO boxes, SPACE = deadman (python -m go2_follow)
@@ -42,7 +44,7 @@ go2/
 ├── requirements_bridge.txt
 ├── requirements_yolo.txt
 ├── requirements_follow.txt
->>>>>>> person-follow
+├── requirements_viz.txt
 └── CLAUDE.md
 ```
 
@@ -67,20 +69,21 @@ python -m go2_webapp
 # MCP server (for Claude Code / Claude Desktop)
 python -m go2_mcp
 
-<<<<<<< HEAD
 # LiDAR subscriber (logs point counts)
 python -m go2_lidar
 
 # Live 3D map from the on-board SLAM (deps: pip install -r requirements_map.txt)
 # sends mapping/start; 'cli_client.py slam mapping/stop' saves and overwrites the robot's single map slot
 python -m go2_map
-=======
+
 # YOLO detection (separate deps: pip install -r requirements_yolo.txt)
 python -m go2_yolo
 
 # Person follow (needs go2_yolo running; hold SPACE in its window to move)
 python -m go2_follow
->>>>>>> person-follow
+
+# Particle-swarm view of the map (deps: pip install -r requirements_viz.txt)
+python -m go2_viz
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):
@@ -122,9 +125,16 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_MAP_START` | `1` | `go2_map` sends `mapping/start` at startup |
 | `GO2_MAP_WEB` | `0` | Open the viewer in the browser instead of the native Rerun window |
 | `GO2_MAP_SAVE` | — | Record to this `.rrd` file instead of showing a viewer |
+| `GO2_MAP_VIEWER_MEMORY` | `1GB` | Memory cap of the live Rerun viewer |
 | `GO2_MAP_FILTER` | `1` | Remove moving objects (people walking past) from the map |
 | `GO2_MAP_FILTER_CELL` | `0.1` | Cell size in metres of the occupancy grid used by the filter |
 | `GO2_MAP_PLY` | `go2_map_<timestamp>.ply` | Map file written on exit (`0` = off) |
+| `GO2_MAP_PUB_PORT` | `5560` | Port on which `go2_map` publishes the cleaned map |
+| `GO2_MAP_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_map` (for `go2_viz`) |
+| `GO2_VIZ_PLY` | — | Show this PLY file instead of the live map |
+| `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
+| `GO2_VIZ_MAX_POINTS` | `80000` | Most map points sent to the browser |
+| `GO2_VIZ_PARAM_PORT` | `5561` | Port where `go2_viz` receives human/robot inputs from robot-data publishers |
 
 ## ZMQ Protocol
 
