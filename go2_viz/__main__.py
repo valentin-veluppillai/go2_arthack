@@ -144,6 +144,7 @@ async def param_source() -> None:
 async def zmq_source() -> None:
     ctx = zmq.asyncio.Context()
     sub = ctx.socket(zmq.SUB)
+    sub.setsockopt(zmq.RCVHWM, 2)  # only the newest maps matter
     sub.connect(f"tcp://{MAP_HOST}:{MAP_PUB_PORT}")
     sub.subscribe(b"occupancy")
     log.info("Listening for go2_map on tcp://%s:%d", MAP_HOST, MAP_PUB_PORT)

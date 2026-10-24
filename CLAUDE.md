@@ -111,6 +111,7 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_MAP_START` | `1` | `go2_map` sends `mapping/start` at startup |
 | `GO2_MAP_WEB` | `0` | Open the viewer in the browser instead of the native Rerun window |
 | `GO2_MAP_SAVE` | — | Record to this `.rrd` file instead of showing a viewer |
+| `GO2_MAP_VIEWER_MEMORY` | `1GB` | Memory cap of the live Rerun viewer |
 | `GO2_MAP_FILTER` | `1` | Remove moving objects (people walking past) from the map |
 | `GO2_MAP_FILTER_CELL` | `0.1` | Cell size in metres of the occupancy grid used by the filter |
 | `GO2_MAP_PLY` | `go2_map_<timestamp>.ply` | Map file written on exit (`0` = off) |

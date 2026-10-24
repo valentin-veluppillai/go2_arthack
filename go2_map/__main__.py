@@ -41,6 +41,10 @@ MAP_CEILING = float(os.getenv("GO2_MAP_CEILING", "1.5"))
 MAP_START = os.getenv("GO2_MAP_START", "1") == "1"  # send mapping/start at startup
 MAP_WEB = os.getenv("GO2_MAP_WEB", "0") == "1"  # browser viewer instead of the native one
 MAP_SAVE = os.getenv("GO2_MAP_SAVE", "")  # write a .rrd recording instead of showing it
+MAP_VIEWER_MEMORY = os.getenv("GO2_MAP_VIEWER_MEMORY", "1GB")  # memory cap of the live viewer
+# The live viewer only keeps the latest map, scan and pose (no timeline), so its memory stays
+# flat over hours; a .rrd recording (GO2_MAP_SAVE) keeps the full history.
+LOG_HISTORY = bool(MAP_SAVE)
 # .ply written on exit (default: go2_map_<timestamp>.ply in the current directory, "0" = off)
 MAP_PLY = os.getenv("GO2_MAP_PLY", "")
 MAP_FILTER = os.getenv("GO2_MAP_FILTER", "1") == "1"  # remove moving objects from the map
@@ -200,13 +204,20 @@ def init_viewer() -> None:
         rr.save(MAP_SAVE)
         log.info("Recording to %s (open with: rerun %s)", MAP_SAVE, MAP_SAVE)
     elif MAP_WEB:
-        rr.serve_web_viewer(connect_to=rr.serve_grpc())
+        rr.serve_web_viewer(connect_to=rr.serve_grpc(server_memory_limit=MAP_VIEWER_MEMORY))
     else:
-        rr.spawn()
+        # the viewer's built-in gRPC server buffers messages for viewers that connect later (1 GiB by
+        # default); ours is connected from the start, so a small buffer is enough
+        rr.spawn(memory_limit=MAP_VIEWER_MEMORY, server_memory_limit="64MB")
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     # Go2 body ≈ 0.70 × 0.31 × 0.40 m, with a heading arrow
     rr.log("world/robot/body", rr.Boxes3D(half_sizes=[0.35, 0.155, 0.2], colors=[255, 140, 0]), static=True)
     rr.log("world/robot/heading", rr.Arrows3D(vectors=[[0.6, 0, 0]], colors=[255, 140, 0]), static=True)
+
+
+def show(entity_path: str, entity) -> None:
+    """Log to the viewer; without history each update replaces the previous one."""
+    rr.log(entity_path, entity, static=not LOG_HISTORY)
 
 
 def main() -> None:
@@ -219,6 +230,7 @@ def main() -> None:
     log.info("Subscribed to tcp://%s:%d", BRIDGE_HOST, SLAM_PORT)
 
     pub = ctx.socket(zmq.PUB)
+    pub.setsockopt(zmq.SNDHWM, 2)  # a stalled subscriber gets the newest maps, not a growing backlog
     pub.bind(f"tcp://*:{MAP_PUB_PORT}")
 
     init_viewer()
@@ -253,21 +265,21 @@ def main() -> None:
                 if MAP_FILTER and odom is not None:
                     # hits in space that was seen free before = something moved there
                     moving = scan[grid.odds_at(scan) < -0.5]
-                    rr.log("world/moving", rr.Points3D(moving, colors=[255, 0, 200], radii=0.05))
+                    show("world/moving", rr.Points3D(moving, colors=[255, 0, 200], radii=0.05))
                     origin = np.asarray(odom["position"]) + rotate(odom["orientation"], LIDAR_OFFSET)
                     floor_z = np.percentile(voxels.points[:, 2], 2) if len(voxels.points) > 1000 else -np.inf
                     grid.update(origin, scan, floor_z + 0.2)
                 voxels.add(scan)
-                rr.log("world/scan", rr.Points3D(below_ceiling(scan, z_ref or 0.0, MAP_CEILING),
-                                                 colors=[255, 255, 255], radii=0.02))
+                show("world/scan", rr.Points3D(below_ceiling(scan, z_ref or 0.0, MAP_CEILING),
+                                               colors=[255, 255, 255], radii=0.02))
                 clouds += 1
                 dirty = True
             elif topic == b"slam_odom":
                 odom = json.loads(frames[0])
                 if z_ref is None:
                     z_ref = odom["position"][2]
-                rr.log("world/robot", rr.Transform3D(translation=odom["position"],
-                                                     rotation=rr.Quaternion(xyzw=odom["orientation"])))
+                show("world/robot", rr.Transform3D(translation=odom["position"],
+                                                   rotation=rr.Quaternion(xyzw=odom["orientation"])))
                 if not path or np.linalg.norm(np.subtract(odom["position"], path[-1])) > 0.05:
                     path.append(odom["position"])
                     dirty = True
@@ -279,9 +291,9 @@ def main() -> None:
                 shown = below_ceiling(voxels.points, z_ref or 0.0, MAP_CEILING)
                 if MAP_FILTER:
                     shown = shown[grid.odds_at(shown) >= 0]  # drop cells cleared by later rays
-                rr.log("world/map", rr.Points3D(shown, colors=height_colors(shown[:, 2]), radii=MAP_VOXEL / 2))
+                show("world/map", rr.Points3D(shown, colors=height_colors(shown[:, 2]), radii=MAP_VOXEL / 2))
                 if len(path) > 1:
-                    rr.log("world/path", rr.LineStrips3D([path], colors=[255, 140, 0]))
+                    show("world/path", rr.LineStrips3D([path], colors=[255, 140, 0]))
                 occupied = map_points()
                 pub.send_multipart([b"occupancy", json.dumps({
                     "stamp": now,
