@@ -24,7 +24,7 @@ from ultralytics import YOLO
 BRIDGE_HOST = os.getenv("GO2_BRIDGE_HOST", "localhost")
 PUB_PORT = int(os.getenv("GO2_ZMQ_PUB_PORT", "5556"))
 YOLO_PUB_PORT = int(os.getenv("GO2_YOLO_PUB_PORT", "5557"))
-YOLO_MODEL = os.getenv("GO2_YOLO_MODEL", "yolo11n.pt")
+YOLO_MODEL = os.getenv("GO2_YOLO_MODEL", "yolo26n-pose.pt")
 YOLO_CONF = float(os.getenv("GO2_YOLO_CONF", "0.4"))
 YOLO_DEVICE = os.getenv("GO2_YOLO_DEVICE") or None  # e.g. "cpu", "mps", "0"
 YOLO_SHOW = os.getenv("GO2_YOLO_SHOW", "1") == "1"
