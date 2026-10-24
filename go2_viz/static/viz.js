@@ -15,31 +15,33 @@ const MAX_PARTICLES = 60000;
 const HOP_CELL = 0.4; // m, neighbourhood for hops between map points
 const RESEED = 0.1;   // share of particles sent to a random spot of each new map, so new areas fill up
 
+// base case: calm, low-contrast grayscale, few slow particles
 const params = {
-  particles: 20000,
-  attraction: 3.0,    // spring strength towards the target point
-  damping: 0.9,       // velocity kept per 1/60 s
-  noise: 0.5,         // flow field strength
-  noiseScale: 0.7,    // flow field spatial frequency (1/m)
-  flowSpeed: 0.35,    // flow field time scale
-  wander: 0.03,       // chance per frame to hop to a neighbouring map point
+  particles: 4000,
+  attraction: 0.8,    // spring strength towards the target point
+  damping: 0.95,      // velocity kept per 1/60 s
+  noise: 0.12,        // flow field strength
+  noiseScale: 0.5,    // flow field spatial frequency (1/m)
+  flowSpeed: 0.08,    // flow field time scale
+  wander: 0.004,      // chance per frame to hop to a neighbouring map point
   floorShare: 0.15,   // share of particles on the floor; the rest go to walls and objects
-  size: 0.045,
-  trails: 0.8,        // 0 = no trails, 0.95 = long trails
+  size: 0.05,
+  opacity: 0.55,
   ceiling: 1.8,       // hide map points this far above the floor (m)
-  colorMode: "height",
+  colorMode: "gray",
   autoRotate: true,
-  rotateSpeed: 0.4,
+  rotateSpeed: 0.15,
   showRobot: true,
 };
 
-// ── renderer, camera, trail fade ─────────────────────────────────
+const BACKGROUND = 0x1a1b1e;
+
+// ── renderer, camera ─────────────────────────────────────────────
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.autoClear = false;
-renderer.setClearColor(0x05060a, 1);
+renderer.setClearColor(BACKGROUND, 1);
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -47,12 +49,6 @@ const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerH
 camera.position.set(8, 6, 8);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-
-// drawing a translucent black quad instead of clearing leaves fading trails
-const fadeScene = new THREE.Scene();
-const fadeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-const fadeMaterial = new THREE.MeshBasicMaterial({ color: 0x05060a, transparent: true, depthTest: false });
-fadeScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), fadeMaterial));
 
 // ── particles ────────────────────────────────────────────────────
 
@@ -81,12 +77,12 @@ function discTexture() {
 
 const material = new THREE.PointsMaterial({
   size: params.size, map: discTexture(), vertexColors: true, transparent: true,
-  depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true,
+  opacity: params.opacity, depthWrite: false, sizeAttenuation: true,
 });
 scene.add(new THREE.Points(geometry, material));
 
-const robot = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12),
-                             new THREE.MeshBasicMaterial({ color: 0xff8c1a }));
+const robot = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12),
+                             new THREE.MeshBasicMaterial({ color: 0x9a9da3 }));
 robot.visible = false;
 scene.add(robot);
 const robotTarget = new THREE.Vector3(); // poses arrive once per second; the marker glides there
@@ -197,7 +193,7 @@ function scatterParticles(from, to) {
     const t = pickTarget();
     targetIndex[i] = t;
     for (let c = 0; c < 3; c++) {
-      positions[i * 3 + c] = targets[t * 3 + c] + (Math.random() - 0.5) * 2;
+      positions[i * 3 + c] = targets[t * 3 + c] + (Math.random() - 0.5) * 0.5;
       velocities[i * 3 + c] = 0;
     }
   }
@@ -288,6 +284,10 @@ function step(dt, time) {
     const glow = 0.45 + Math.min(speed * 0.6, 1.2);
     if (params.colorMode === "height") {
       colors[p] = targetColors[q] * glow; colors[p + 1] = targetColors[q + 1] * glow; colors[p + 2] = targetColors[q + 2] * glow;
+    } else if (params.colorMode === "gray") {
+      // narrow band of mid grays: slightly lighter higher up and when moving
+      const h = (targetColors[q] + targetColors[q + 1] + targetColors[q + 2]) / 3;
+      colors[p] = colors[p + 1] = colors[p + 2] = 0.42 + 0.08 * h + Math.min(speed * 0.15, 0.06);
     } else if (params.colorMode === "speed") {
       heightColor(Math.min(speed / 1.5, 1), colors, p);
     } else {
@@ -312,8 +312,8 @@ swarm.add(params, "wander", 0, 0.3, 0.005);
 swarm.add(params, "floorShare", 0, 1, 0.01).name("floor share").onChange(() => scatterParticles(0, MAX_PARTICLES));
 const look = gui.addFolder("Look");
 look.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.size = v; });
-look.add(params, "trails", 0, 0.97, 0.01);
-look.add(params, "colorMode", ["height", "speed", "white"]);
+look.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.opacity = v; });
+look.add(params, "colorMode", ["gray", "height", "speed", "white"]);
 look.add(params, "ceiling", 0.3, 5, 0.1).name("ceiling (m)").onChange(rebuildTargets);
 look.add(params, "showRobot").onChange((v) => { robot.visible = v && mapStats.updates > 0; });
 const cam = gui.addFolder("Camera");
@@ -375,19 +375,14 @@ function frame() {
   controls.autoRotateSpeed = params.rotateSpeed;
   controls.update();
 
-  fadeMaterial.opacity = 1 - params.trails;
-  renderer.render(fadeScene, fadeCamera);
-  renderer.clearDepth();
   renderer.render(scene, camera);
   updateHud(performance.now());
   requestAnimationFrame(frame);
 }
-renderer.clear();
 frame();
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.clear();
 });
