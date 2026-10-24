@@ -23,3 +23,6 @@ Thumbs.db
 # Misc
 *.jpg
 *.png
+
+# Map exports
+*.ply

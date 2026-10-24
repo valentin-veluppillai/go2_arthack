@@ -6,6 +6,12 @@ it live in a Rerun 3D viewer, together with the robot pose, its path and the
 current scan. The map keeps everything seen so far, so the whole area around
 the robot stays visible.
 
+Moving objects (people walking past) would leave trails in that map. A coarse
+occupancy grid removes them: every scan ray marks the space it passes through
+as free, so cells that were only briefly occupied are cleared again, while
+walls and furniture keep getting hit. Scan points that land in space seen
+free before are shown separately as "moving".
+
 uslam only publishes while it is mapping (or localized on a saved map), so by
 default this sends "mapping/start" through the bridge at startup.
 """
@@ -31,7 +37,13 @@ MAP_CEILING = float(os.getenv("GO2_MAP_CEILING", "1.5"))
 MAP_START = os.getenv("GO2_MAP_START", "1") == "1"  # send mapping/start at startup
 MAP_WEB = os.getenv("GO2_MAP_WEB", "0") == "1"  # browser viewer instead of the native one
 MAP_SAVE = os.getenv("GO2_MAP_SAVE", "")  # write a .rrd recording instead of showing it
+# .ply written on exit (default: go2_map_<timestamp>.ply in the current directory, "0" = off)
+MAP_PLY = os.getenv("GO2_MAP_PLY", "")
+MAP_FILTER = os.getenv("GO2_MAP_FILTER", "1") == "1"  # remove moving objects from the map
+MAP_FILTER_CELL = float(os.getenv("GO2_MAP_FILTER_CELL", "0.1"))  # occupancy cell size, metres
 MAP_LOG_HZ = 1.0  # full-map refresh rate in the viewer
+# LiDAR position on the body (URDF radar_joint), the origin of every scan ray
+LIDAR_OFFSET = np.array([0.28945, 0.0, -0.046825])
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("go2_map")
@@ -55,6 +67,18 @@ def cloud_to_xyz(meta: dict, data: bytes) -> np.ndarray:
     return xyz[np.isfinite(xyz).all(axis=1)]
 
 
+def voxel_keys(pts: np.ndarray, size: float) -> np.ndarray:
+    """Pack voxel indices into one int64 per point (21 bits per axis)."""
+    idx = np.floor(pts / size).astype(np.int64) + (1 << 20)  # ±52 km at 5 cm
+    return (idx[:, 0] << 42) | (idx[:, 1] << 21) | idx[:, 2]
+
+
+def rotate(q: list[float], v: np.ndarray) -> np.ndarray:
+    """Rotate vector v by quaternion q = [x, y, z, w]."""
+    u, w = np.asarray(q[:3]), q[3]
+    return v + 2 * w * np.cross(u, v) + 2 * np.cross(u, np.cross(u, v))
+
+
 class VoxelMap:
     """Keeps one point per voxel; the first point seen in a voxel stays."""
 
@@ -63,15 +87,66 @@ class VoxelMap:
         self.keys = np.empty(0, dtype=np.int64)
         self.points = np.empty((0, 3), dtype=np.float32)
 
-    def _keys(self, pts: np.ndarray) -> np.ndarray:
-        idx = np.floor(pts / self.voxel).astype(np.int64) + (1 << 20)  # ±52 km at 5 cm
-        return (idx[:, 0] << 42) | (idx[:, 1] << 21) | idx[:, 2]
-
     def add(self, pts: np.ndarray) -> None:
-        keys = np.concatenate([self.keys, self._keys(pts)])
+        keys = np.concatenate([self.keys, voxel_keys(pts, self.voxel)])
         points = np.concatenate([self.points, pts])
         self.keys, first = np.unique(keys, return_index=True)  # existing voxels come first
         self.points = points[first]
+
+
+class OccupancyGrid:
+    """Coarse log-odds occupancy grid: hits raise a cell, rays passing through lower it.
+
+    A person walking past hits a cell once or twice; later rays pass through
+    the then-empty cell and clear it, so the trail disappears. Static surfaces
+    are hit over and over and stay.
+    """
+
+    HIT, MISS, LOW, HIGH = 0.85, -0.4, -2.0, 3.5
+
+    def __init__(self, cell: float) -> None:
+        self.cell = cell
+        self.keys = np.empty(0, dtype=np.int64)  # sorted
+        self.odds = np.empty(0, dtype=np.float32)
+
+    def odds_at(self, pts: np.ndarray) -> np.ndarray:
+        """Log-odds of the cell each point falls in (0 = never observed)."""
+        if not len(self.keys):
+            return np.zeros(len(pts), dtype=np.float32)
+        keys = voxel_keys(pts, self.cell)
+        idx = np.minimum(np.searchsorted(self.keys, keys), len(self.keys) - 1)
+        return np.where(self.keys[idx] == keys, self.odds[idx], 0.0)
+
+    def _add(self, keys: np.ndarray, delta: float) -> None:
+        """Add delta to the cells in keys (unique), creating unseen ones."""
+        idx = np.searchsorted(self.keys, keys)
+        found = idx < len(self.keys)
+        found[found] = self.keys[idx[found]] == keys[found]
+        self.odds[idx[found]] = np.clip(self.odds[idx[found]] + delta, self.LOW, self.HIGH)
+        new = keys[~found]
+        if len(new):
+            keys_all = np.concatenate([self.keys, new])
+            odds_all = np.concatenate([self.odds, np.full(len(new), delta, dtype=np.float32)])
+            order = np.argsort(keys_all)
+            self.keys, self.odds = keys_all[order], odds_all[order]
+
+    def update(self, origin: np.ndarray, scan: np.ndarray, min_z: float) -> None:
+        """Integrate one scan taken from origin; space below min_z (the floor) is never cleared."""
+        hits = np.unique(voxel_keys(scan, self.cell))
+        d = scan - origin
+        r = np.linalg.norm(d, axis=1)
+        keep = (r > 0.1) & (r < 15.0)
+        d, r = d[keep] / r[keep, None], r[keep]
+        if not len(r):
+            return
+        steps = np.arange(self.cell / 2, r.max(), self.cell / 2)
+        # stop two cells short of each hit so grazing rays don't eat into the surface
+        along = steps[None, :] < (r[:, None] - 2 * self.cell)
+        samples = (origin + d[:, None, :] * steps[None, :, None])[along]
+        samples = samples[samples[:, 2] > min_z]
+        misses = np.setdiff1d(np.unique(voxel_keys(samples, self.cell)), hits, assume_unique=True)
+        self._add(misses, self.MISS)
+        self._add(hits, self.HIT)
 
 
 def below_ceiling(points: np.ndarray, z_ref: float, ceiling: float) -> np.ndarray:
@@ -85,6 +160,20 @@ def height_colors(z: np.ndarray) -> np.ndarray:
     anchors = np.array([[40, 70, 220], [40, 190, 220], [80, 200, 80], [240, 220, 60], [230, 60, 40]])
     pos = np.linspace(0, 1, len(anchors))
     return np.stack([np.interp(t, pos, anchors[:, c]) for c in range(3)], axis=1).astype(np.uint8)
+
+
+def save_ply(path: str, points: np.ndarray, colors: np.ndarray) -> None:
+    """Binary little-endian PLY with x, y, z (float) and red, green, blue (uchar)."""
+    rec = np.zeros(len(points), dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+                                       ("red", "u1"), ("green", "u1"), ("blue", "u1")])
+    rec["x"], rec["y"], rec["z"] = points.T
+    rec["red"], rec["green"], rec["blue"] = colors.T
+    header = (f"ply\nformat binary_little_endian 1.0\nelement vertex {len(rec)}\n"
+              "property float x\nproperty float y\nproperty float z\n"
+              "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
+    with open(path, "wb") as f:
+        f.write(header.encode())
+        f.write(rec.tobytes())
 
 
 def send_slam_command(ctx: zmq.Context, command: str) -> None:
@@ -131,6 +220,9 @@ def main() -> None:
         send_slam_command(ctx, "mapping/start")
 
     voxels = VoxelMap(MAP_VOXEL)
+    grid = OccupancyGrid(MAP_FILTER_CELL)
+    odom: dict | None = None
+    moving = np.empty((0, 3), dtype=np.float32)
     path: list[list[float]] = []
     z_ref: float | None = None  # robot height at the first pose, reference for the ceiling cut
     t_start = t_logged = t_rx = time.time()
@@ -147,6 +239,13 @@ def main() -> None:
             if topic == b"slam_cloud":
                 t_rx = time.time()
                 scan = cloud_to_xyz(json.loads(frames[0]), frames[1])
+                if MAP_FILTER and odom is not None:
+                    # hits in space that was seen free before = something moved there
+                    moving = scan[grid.odds_at(scan) < -0.5]
+                    rr.log("world/moving", rr.Points3D(moving, colors=[255, 0, 200], radii=0.05))
+                    origin = np.asarray(odom["position"]) + rotate(odom["orientation"], LIDAR_OFFSET)
+                    floor_z = np.percentile(voxels.points[:, 2], 2) if len(voxels.points) > 1000 else -np.inf
+                    grid.update(origin, scan, floor_z + 0.2)
                 voxels.add(scan)
                 rr.log("world/scan", rr.Points3D(below_ceiling(scan, z_ref or 0.0, MAP_CEILING),
                                                  colors=[255, 255, 255], radii=0.02))
@@ -167,11 +266,15 @@ def main() -> None:
             now = time.time()
             if dirty and now - t_logged >= 1.0 / MAP_LOG_HZ:
                 shown = below_ceiling(voxels.points, z_ref or 0.0, MAP_CEILING)
+                if MAP_FILTER:
+                    shown = shown[grid.odds_at(shown) >= 0]  # drop cells cleared by later rays
                 rr.log("world/map", rr.Points3D(shown, colors=height_colors(shown[:, 2]), radii=MAP_VOXEL / 2))
                 if len(path) > 1:
                     rr.log("world/path", rr.LineStrips3D([path], colors=[255, 140, 0]))
-                log.info("map: %d points (%d scans), extent %s m", len(voxels.points), clouds,
-                         [round(float(v), 1) for v in np.ptp(voxels.points, axis=0)] if len(voxels.points) else "-")
+                log.info("map: %d points shown (%d scans), extent %s m, %d moving points in the last scan",
+                         len(shown), clouds,
+                         [round(float(v), 1) for v in np.ptp(voxels.points, axis=0)] if len(voxels.points) else "-",
+                         len(moving))
                 t_logged, dirty = now, False
 
             if not clouds and now - t_start > 10 and now - t_rx > 10:
@@ -183,6 +286,12 @@ def main() -> None:
     finally:
         sub.close()
         ctx.term()
+        if MAP_PLY != "0" and len(voxels.points):
+            # full map (no ceiling cut), moving objects removed
+            points = voxels.points[grid.odds_at(voxels.points) >= 0] if MAP_FILTER else voxels.points
+            path_ply = MAP_PLY or time.strftime("go2_map_%Y%m%d_%H%M%S.ply")
+            save_ply(path_ply, points, height_colors(points[:, 2]))
+            log.info("Saved %d map points to %s", len(points), os.path.abspath(path_ply))
         log.info("Mapping keeps running on the robot. 'slam mapping/stop' saves the map and "
                  "overwrites the robot's single saved map.")
 
