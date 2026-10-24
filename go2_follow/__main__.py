@@ -28,11 +28,11 @@ CMD_PORT = int(os.getenv("GO2_ZMQ_CMD_PORT", "5555"))
 YOLO_HOST = os.getenv("GO2_YOLO_HOST", BRIDGE_HOST)
 YOLO_PUB_PORT = int(os.getenv("GO2_YOLO_PUB_PORT", "5557"))
 
-FOLLOW_EDGE = float(os.getenv("GO2_FOLLOW_EDGE", "0.3"))  # turn zone, fraction of width per side
+FOLLOW_EDGE = float(os.getenv("GO2_FOLLOW_EDGE", "0.4"))  # turn zone, fraction of width per side
 FOLLOW_AREA_FAR = float(os.getenv("GO2_FOLLOW_AREA_FAR", "0.05"))  # walk forward below this
 FOLLOW_AREA_NEAR = float(os.getenv("GO2_FOLLOW_AREA_NEAR", "0.20"))  # walk backward above this
 FOLLOW_VX = float(os.getenv("GO2_FOLLOW_VX", "0.3"))  # m/s
-FOLLOW_VYAW = float(os.getenv("GO2_FOLLOW_VYAW", "0.6"))  # rad/s
+FOLLOW_VYAW = float(os.getenv("GO2_FOLLOW_VYAW", "0.7"))  # rad/s
 FOLLOW_CONF = float(os.getenv("GO2_FOLLOW_CONF", "0.5"))
 FOLLOW_STALE_S = 0.5  # stop if no detections for this long
 FOLLOW_HZ = 20
