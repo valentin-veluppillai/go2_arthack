@@ -171,6 +171,16 @@ python -m go2_lidar
 
 It only needs `pyzmq`, so it can run on any machine that can reach the bridge.
 
+`go2_lidar.depth` renders the stream as a 360° depth image: azimuth runs across (straight ahead in the centre, left of the robot on the left), elevation runs down, and each pixel is the distance from the sensor. Near is red, far is blue, no return is black. The L1 is sparse per scan, so the last 10 clouds are merged and small gaps are filled with the nearest neighbouring point.
+
+```bash
+pip install -r requirements_lidar.txt
+python -m go2_lidar.depth                                # window (q / Esc to quit)
+GO2_DEPTH_SHOW=0 GO2_DEPTH_SAVE=depth.png python -m go2_lidar.depth
+```
+
+With `GO2_DEPTH_SAVE` it writes the colourised image and a 16-bit depth PNG in millimetres (`depth_mm.png`) once per second.
+
 ## ZMQ Protocol
 
 ### Commands (REQ/REP — port 5555)
@@ -256,6 +266,12 @@ All settings via environment variables:
 | `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
 | `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
 | `GO2_ZMQ_LIDAR_PORT` | `5558` | LiDAR PUB/SUB port |
+| `GO2_DEPTH_WIDTH` | `720` | Depth image width in pixels (height = width / 2) |
+| `GO2_DEPTH_MAX_RANGE` | `10` | Range in metres mapped to the coldest colour |
+| `GO2_DEPTH_ACCUMULATE` | `10` | Number of recent clouds merged into one image |
+| `GO2_DEPTH_FILL` | `5` | Gap-fill kernel size (0 = off) |
+| `GO2_DEPTH_SHOW` | `1` | Show the depth image in a window |
+| `GO2_DEPTH_SAVE` | — | Save the image to this path once per second |
 
 ## Writing Custom Clients
 

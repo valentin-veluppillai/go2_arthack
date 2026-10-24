@@ -26,9 +26,11 @@ go2/
 │   ├── server.py        # FastMCP tools → ZMQ bridge client
 │   └── __main__.py      # Entry point (stdio transport)
 ├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
+│   └── depth.py         # 360° depth image from the point cloud (python -m go2_lidar.depth)
 ├── unitree_sdk2_python/  # Unitree SDK2 Python (clone, not committed)
 ├── go2_py311/           # Python 3.11 venv (not committed)
 ├── requirements_bridge.txt
+├── requirements_lidar.txt
 └── CLAUDE.md
 ```
 
@@ -55,6 +57,9 @@ python -m go2_mcp
 
 # LiDAR subscriber (logs point counts)
 python -m go2_lidar
+
+# LiDAR depth image (deps: pip install -r requirements_lidar.txt)
+python -m go2_lidar.depth
 ```
 
 **Claude Desktop configuration** (`claude_desktop_config.json`):
@@ -89,6 +94,12 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS PointCloud2 topic to forward |
 | `GO2_LIDAR_SWITCH_ON` | `1` | Send `ON` to `rt/utlidar/switch` at startup |
 | `GO2_ZMQ_LIDAR_PORT` | `5558` | LiDAR PUB/SUB port |
+| `GO2_DEPTH_WIDTH` | `720` | Depth image width in pixels (height = width / 2) |
+| `GO2_DEPTH_MAX_RANGE` | `10` | Range in metres mapped to the coldest colour |
+| `GO2_DEPTH_ACCUMULATE` | `10` | Number of recent clouds merged into one image |
+| `GO2_DEPTH_FILL` | `5` | Gap-fill kernel size (0 = off) |
+| `GO2_DEPTH_SHOW` | `1` | Show the depth image in a window |
+| `GO2_DEPTH_SAVE` | — | Save the image to this path once per second |
 
 ## ZMQ Protocol
 
