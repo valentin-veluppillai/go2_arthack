@@ -22,6 +22,9 @@
     button.recording { background: #6a1d1d; border-color: #e05a5a; }
     #waiting { position: fixed; inset: 0; display: grid; place-items: center; color: var(--muted);
                pointer-events: none; }
+    /* h hides every UI element for a clean demo view */
+    body.clean #hud, body.clean .lil-gui.root, body.clean #waiting { display: none !important; }
+    body.clean { cursor: none; }
   </style>
   <script type="importmap">
     { "imports": {

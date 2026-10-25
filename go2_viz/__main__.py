@@ -32,6 +32,11 @@ the map and blurred by GO2_VIZ_BLUR (a fraction of the image width). The
 browser screen-blends the colour with the robot's time-of-flight colour
 around the human inside the view cone.
 
+Presets: GO2_VIZ_PRESET names a JSON file with the panel settings and camera
+view. Browsers load it at startup (GET /preset) and the panel's "save to
+server" writes it (PUT /preset), so a tuned look survives restarts and other
+machines.
+
 WebSocket messages: the map is binary (uint32 header length, JSON header,
 padding to a multiple of 4 bytes, then float32 x, y, z triples followed by
 float32 surface normals, then uint8 r, g, b, a per point if the header has
@@ -53,7 +58,7 @@ import uvicorn
 import zmq
 import zmq.asyncio
 from scipy.spatial import cKDTree
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -68,6 +73,7 @@ VIZ_MAX_POINTS = int(os.getenv("GO2_VIZ_MAX_POINTS", "80000"))  # sent to the br
 VIZ_PARAM_PORT = int(os.getenv("GO2_VIZ_PARAM_PORT", "5561"))  # SUB binds here; publishers connect
 VIZ_TEXTURE = os.getenv("GO2_VIZ_TEXTURE", "")  # human channel: "pattern" or an image file (panorama)
 VIZ_BLUR = float(os.getenv("GO2_VIZ_BLUR", "0.03"))  # blur sigma, fraction of the texture width
+VIZ_PRESET = os.getenv("GO2_VIZ_PRESET", "")  # panel settings loaded by browsers at startup (JSON)
 REMOTE_PARAMS = {"distance", "velocity", "entropy", "confidence", "scale",
                  "headYaw", "headPitch", "coneAngle", "trackHuman", "humanBearing",
                  "boxLeft", "boxRight", "boxTop", "boxBottom"}
@@ -242,6 +248,23 @@ app = FastAPI(title="Go2 Map Viz", lifespan=lifespan)
 @app.get("/")
 async def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/preset")
+async def get_preset():
+    if not VIZ_PRESET or not os.path.exists(VIZ_PRESET):
+        raise HTTPException(404, "no preset (set GO2_VIZ_PRESET)")
+    return FileResponse(VIZ_PRESET, media_type="application/json")
+
+
+@app.put("/preset")
+async def put_preset(request: Request):
+    if not VIZ_PRESET:
+        raise HTTPException(404, "no preset file configured (set GO2_VIZ_PRESET)")
+    preset = await request.json()
+    Path(VIZ_PRESET).write_text(json.dumps(preset, indent=2))
+    log.info("Saved preset to %s", VIZ_PRESET)
+    return {"saved": VIZ_PRESET}
 
 
 @app.websocket("/ws/map")

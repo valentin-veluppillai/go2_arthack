@@ -115,9 +115,12 @@ const params = {
   humanChannel: true, // screen-blend the human (photographic) channel into the cone paint
   fovRange: 4,        // m
   desaturate: 3,      // s for a particle to lose its colour after leaving the field of view
+  showBase: true,     // render toggles, so a demo can show only what it needs
+  showFocus: true,
   showRobot: true,
   showFov: true,
   showHuman: true,
+  showHud: true,
   autoRotate: true,
   rotateSpeed: 0.15,
 };
@@ -849,7 +852,6 @@ humanFolder.add(inputs, "velocity", 0, 1, 0.01).name("gesture velocity");
 humanFolder.add(inputs, "confidence", 0, 1, 0.01).name("posture confidence");
 humanFolder.add(inputs, "scale", 0, 1, 0.01).name("detected scale");
 humanFolder.add(inputs, "humanBearing", -180, 180, 1).name("bearing (°)");
-humanFolder.add(params, "showHuman").name("show human");
 
 const robotFolder = gui.addFolder("Robot & canvas");
 robotFolder.add(inputs, "headYaw", -180, 180, 1).name("head yaw (°)");
@@ -857,8 +859,33 @@ robotFolder.add(inputs, "headPitch", -60, 60, 1).name("head pitch (°)");
 robotFolder.add(inputs, "coneAngle", 15, 90, 1).name("cone angle (°)");
 robotFolder.add(inputs, "trackHuman").name("head tracks human");
 robotFolder.add(inputs, "entropy", 0, 1, 0.01).name("entropy / noise");
-robotFolder.add(params, "showRobot").name("show robot").onChange((v) => { robot.children[0].visible = v; });
-robotFolder.add(params, "showFov").name("show view cone").onChange((v) => { fovCone.visible = v; });
+
+// what is drawn: the two particle pools, the helpers and the HUD
+const renderFolder = gui.addFolder("Render");
+renderFolder.add(params, "showBase").name("base particles").onChange(applyRender);
+renderFolder.add(params, "showFocus").name("focus particles").onChange(applyRender);
+renderFolder.add(params, "showRobot").name("robot").onChange(applyRender);
+renderFolder.add(params, "showFov").name("view cone").onChange(applyRender);
+renderFolder.add(params, "showHuman").name("human column").onChange(applyRender);
+renderFolder.add(params, "showHud").name("HUD").onChange(applyRender);
+renderFolder.add({ particlesOnly }, "particlesOnly").name("particles only");
+renderFolder.close();
+
+function applyRender() {
+  // base particles occupy slots [0, BASE_MAX), focus particles the rest
+  const from = params.showBase ? 0 : BASE_MAX, to = params.showFocus ? MAX_PARTICLES : BASE_MAX;
+  geometry.setDrawRange(from, Math.max(0, to - from));
+  robot.children[0].visible = params.showRobot;
+  fovCone.visible = params.showFov;
+  human.visible = params.showHuman;
+  document.getElementById("hud").style.display = params.showHud ? "" : "none";
+}
+
+function particlesOnly() {
+  Object.assign(params, { showBase: true, showFocus: true, showRobot: false, showFov: false, showHuman: false, showHud: false });
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+  applyRender();
+}
 
 const tuning = gui.addFolder("Tuning");
 tuning.close();
@@ -891,6 +918,91 @@ cam.add(params, "autoRotate");
 cam.add(params, "rotateSpeed", -3, 3, 0.1);
 cam.add({ fit: fitView }, "fit").name("fit view");
 for (const f of [swarm, lookFolder, markerFolder, cam]) f.close();
+
+// ── presets: every panel setting plus the camera view ────────────
+// Loaded at startup from this browser (if saved here), else from the server's GO2_VIZ_PRESET file.
+
+const PRESET_KEY = "go2_viz.preset";
+const defaults = gui.save();
+
+function currentPreset() {
+  return { version: 1, gui: gui.save(), view: { position: camera.position.toArray(), target: controls.target.toArray() } };
+}
+
+function applyPreset(preset) {
+  if (preset.gui) gui.load(preset.gui);  // runs each setting's onChange, so uniforms and colours follow
+  if (preset.view) {
+    camera.position.fromArray(preset.view.position);
+    controls.target.fromArray(preset.view.target);
+    controls.update();
+    hasFitView = true;  // keep this view when the first map arrives
+  }
+  applyRender();
+}
+
+// show a short result in a button's label
+function flash(controller, text) {
+  const name = controller._name;
+  controller.name(text);
+  setTimeout(() => controller.name(name), 1500);
+}
+
+const presetFolder = gui.addFolder("Presets");
+const presetActions = {
+  saveFile: () => download(new Blob([JSON.stringify(currentPreset(), null, 2)], { type: "application/json" }),
+                           `go2_viz_preset_${Date.now()}.json`),
+  loadFile: () => presetInput.click(),
+  saveBrowser: () => {
+    try { localStorage.setItem(PRESET_KEY, JSON.stringify(currentPreset())); flash(saveBrowserCtrl, "saved ✓"); }
+    catch { flash(saveBrowserCtrl, "not available"); }
+  },
+  saveServer: async () => {
+    try {
+      const res = await fetch("/preset", { method: "PUT", headers: { "Content-Type": "application/json" },
+                                           body: JSON.stringify(currentPreset()) });
+      flash(saveServerCtrl, res.ok ? "saved ✓" : "no GO2_VIZ_PRESET");
+    } catch { flash(saveServerCtrl, "failed"); }
+  },
+  reset: () => {
+    try { localStorage.removeItem(PRESET_KEY); } catch {}
+    gui.load(defaults);
+    applyRender();
+    fitView();
+  },
+};
+presetFolder.add(presetActions, "saveFile").name("save to file");
+presetFolder.add(presetActions, "loadFile").name("load from file");
+const saveBrowserCtrl = presetFolder.add(presetActions, "saveBrowser").name("save in browser");
+const saveServerCtrl = presetFolder.add(presetActions, "saveServer").name("save to server");
+presetFolder.add(presetActions, "reset").name("reset to defaults");
+presetFolder.close();
+
+const presetInput = Object.assign(document.createElement("input"), { type: "file", accept: ".json,application/json" });
+presetInput.onchange = async () => {
+  const file = presetInput.files[0];
+  presetInput.value = "";
+  if (file) applyPreset(JSON.parse(await file.text()));
+};
+
+(async () => {
+  let stored = null;
+  try { stored = localStorage.getItem(PRESET_KEY); } catch {}
+  if (stored) { applyPreset(JSON.parse(stored)); return; }
+  try {
+    const res = await fetch("/preset");
+    if (res.ok) applyPreset(await res.json());
+  } catch {}
+})();
+
+// h: hide / show every UI element (panel, HUD, overlays, cursor) for a clean demo view; f: fullscreen
+window.addEventListener("keydown", (ev) => {
+  if (ev.target.closest?.("input, textarea, select") || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (ev.key === "h") document.body.classList.toggle("clean");
+  else if (ev.key === "f") {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  }
+});
 
 document.getElementById("snapshot").onclick = () => {
   renderer.domElement.toBlob((blob) => download(blob, `go2_swarm_${Date.now()}.png`));

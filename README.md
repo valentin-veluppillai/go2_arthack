@@ -266,6 +266,16 @@ GO2_VIZ_PLY=go2_map_20261024_173512.ply python -m go2_viz   # from a saved map, 
 
 Open http://localhost:8090. The panel has the test controls from the spec: **Human** (distance, gesture velocity, posture confidence, detected scale, bearing) and **Robot & canvas** (head yaw/pitch, cone angle, head tracks human, entropy). A simulated human (a translucent column) stands at the given distance and bearing; with *head tracks human* the head turns towards it. Without a robot pose (e.g. a PLY file) a virtual robot stands in the middle of the map. The swarm's own behaviour (base particles, focus density, spring, flow drift, hops, size, opacity, colours, view range, desaturation time, marker changes, camera) is in the collapsed **Tuning** folder. The HUD shows the data source, robot source, points and focus particles in the cone, and the current mapping (jitter, dispersion, saturation, marker share). **Snapshot** saves the current frame as PNG, **Record** records the frame stream as WebM.
 
+**Tuning and demos.**
+- **Presets** (panel → Presets) save every panel setting plus the camera view: *save to file* / *load from file* (JSON), *save in browser* (restored on the next load in that browser), *save to server* (writes `GO2_VIZ_PRESET`, which every browser loads at startup unless it has its own browser preset), *reset to defaults*.
+- **Render** switches each layer on or off: base particles, focus particles, robot, view cone, human column, HUD. *Particles only* turns off everything but the particles.
+- **Hotkeys:** `h` hides all UI (panel, HUD, overlays, mouse cursor) for a clean view, `f` toggles fullscreen.
+- [go2_viz/TUNING.md](go2_viz/TUNING.md) lists every variable that shapes the look, with file and line: panel settings, the input → visual formulas, renderer constants and the data-side environment variables.
+
+```bash
+GO2_VIZ_PRESET=demo_look.json python -m go2_viz   # tune, "save to server", and every browser starts with that look
+```
+
 **Dual-stream colour.** Inside the cone, where the human is, two colour channels are screen-blended: the robot channel (the time-of-flight false colour) and the human channel (photographic RGB of the map point):
 
     C_final = 1 − (1 − w_r · C_robot) × (1 − w_h · C_human),   w_h = engagement × vignette,   w_r = 1 − w_h
@@ -460,6 +470,7 @@ All settings via environment variables:
 | `GO2_VIZ_PARAM_HOST` | `localhost` | Host running `go2_viz` (for `go2_viz.feed` and `go2_viz.send`) |
 | `GO2_VIZ_TEXTURE` | — | Human colour channel for offline tests: `pattern` or an equirectangular image file |
 | `GO2_VIZ_BLUR` | `0.03` | Blur of the human channel texture (sigma, fraction of its width) |
+| `GO2_VIZ_PRESET` | — | Preset file (panel settings + view) browsers load at startup; written by *save to server* |
 | `GO2_CAMERA_HFOV` | `120` | Horizontal field of view of the front camera (°): `go2_viz.feed` bearing/distance and `go2_map` colours |
 | `GO2_CAMERA_PITCH` | `0` | How far the front camera looks down (°), for `go2_viz.feed` box angles and `go2_map` colours |
 | `GO2_FEED_PERSON_H` | `1.7` | Assumed body height (m) for the distance estimate |
