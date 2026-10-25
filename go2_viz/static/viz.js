@@ -86,7 +86,7 @@ function deriveFromInputs() {
   derived.tear = THREE.MathUtils.clamp((1 - d) / 0.7, 0, 1);                          // 0 at 1 m, 1 at 0.3 m
   derived.focusFactor = 1 + 14 * inputs.velocity;
   derived.dispersion = inputs.entropy;
-  derived.saturation = inputs.confidence;
+  derived.saturation = params.saturationFloor + (1 - params.saturationFloor) * inputs.confidence; // never fully gray
   derived.markerRatio = inputs.scale;
   // either closeness (the jitter term: 1 at ≤1 m) or movement engages; together they saturate
   derived.engagement = 1 - (1 - derived.jitter) * (1 - inputs.velocity);
@@ -115,6 +115,10 @@ const params = {
   humanChannel: true, // screen-blend the human (photographic) channel into the cone paint
   fovRange: 4,        // m
   desaturate: 3,      // s for a particle to lose its colour after leaving the field of view
+  saturationFloor: 0.4, // in-cone saturation at posture confidence 0 (1 at confidence 1)
+  saturationBoost: 1.5, // pushes in-cone colours (robot and human channel) away from their gray
+  baseGray: 0.48,     // brightness of the base particles outside the cone
+  background: "#0a0a0b", // dark and neutral, for contrast with the particles
   showBase: true,     // render toggles, so a demo can show only what it needs
   showFocus: true,
   showRobot: true,
@@ -125,7 +129,6 @@ const params = {
   rotateSpeed: 0.15,
 };
 
-const BACKGROUND = 0x1a1b1e;
 const paintRGB = new THREE.Color(params.paintColor);
 
 // Inputs from robot data arrive over the WebSocket (from go2_viz's ZMQ port 5561).
@@ -161,7 +164,7 @@ function easeRemoteInputs(dt) {
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setClearColor(BACKGROUND, 1);
+renderer.setClearColor(params.background, 1);
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -813,7 +816,7 @@ function step(dt, time) {
     if (params.colorMode === "gray") {
       // narrow band of mid grays: slightly lighter higher up and when moving
       const h = (targetColors[q] + targetColors[q + 1] + targetColors[q + 2]) / 3;
-      const g = 0.42 + 0.08 * h + Math.min(speed * 0.15, 0.06);
+      const g = params.baseGray + 0.08 * h + Math.min(speed * 0.15, 0.06);
       if (sat > 0) {
         // paint: viridis by distance from the head (faked time of flight), height colours or one colour,
         // desaturated towards its own luminance when posture confidence is low
@@ -823,7 +826,10 @@ function step(dt, time) {
         const w = wh > 0 && targetAlpha[ti] > 0 ? wh * targetAlpha[ti] * humanMask(drawn[p], drawn[p + 1], drawn[p + 2]) : 0;
         if (w > 0) for (let c = 0; c < 3; c++) paint[c] = 1 - (1 - (1 - w) * paint[c]) * (1 - w * targetRGB[q + c]);
         const lum = 0.2126 * paint[0] + 0.7152 * paint[1] + 0.0722 * paint[2];
-        for (let c = 0; c < 3; c++) colors[p + c] = g + (lum + (paint[c] - lum) * conf - g) * sat;
+        for (let c = 0; c < 3; c++) {
+          const v = g + (lum + (paint[c] - lum) * conf * params.saturationBoost - g) * sat;
+          colors[p + c] = Math.min(1, Math.max(0, v));  // the boost can overshoot; clamp so hues don't shift
+        }
       } else {
         colors[p] = colors[p + 1] = colors[p + 2] = g;
       }
@@ -871,6 +877,11 @@ renderFolder.add(params, "showHud").name("HUD").onChange(applyRender);
 renderFolder.add({ particlesOnly }, "particlesOnly").name("particles only");
 renderFolder.close();
 
+function applyBackground() {
+  renderer.setClearColor(params.background, 1);
+  document.documentElement.style.setProperty("--bg", params.background);
+}
+
 function applyRender() {
   // base particles occupy slots [0, BASE_MAX), focus particles the rest
   const from = params.showBase ? 0 : BASE_MAX, to = params.showFocus ? MAX_PARTICLES : BASE_MAX;
@@ -902,6 +913,10 @@ swarm.add(params, "floorShare", 0, 1, 0.01).name("floor share");
 const lookFolder = tuning.addFolder("Look");
 lookFolder.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.uniforms.size.value = v; });
 lookFolder.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.uniforms.opacity.value = v; });
+lookFolder.add(params, "saturationFloor", 0, 1, 0.01).name("saturation floor");
+lookFolder.add(params, "saturationBoost", 0.5, 3, 0.05).name("saturation boost");
+lookFolder.add(params, "baseGray", 0.1, 0.9, 0.01).name("base gray");
+lookFolder.addColor(params, "background").onChange(applyBackground);
 lookFolder.add(params, "colorMode", ["gray", "height", "speed", "white"]);
 lookFolder.add(params, "ceiling", 0.3, 5, 0.1).name("ceiling (m)").onChange(rebuildTargets);
 lookFolder.add(params, "paintMode", ["time of flight", "height", "color"]).name("cone paint");

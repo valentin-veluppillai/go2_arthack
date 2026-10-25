@@ -17,7 +17,7 @@ Defaults live in `params` / `inputs` in [static/viz.js](static/viz.js#L61).
 |---|---|---|---|---|
 | Human | distance, gesture velocity, posture confidence, detected scale, bearing | `inputs.*` (simulated human; overridden live by `go2_viz.feed`) | 5, 0, 0, 0, 0 | [viz.js:62](static/viz.js#L62) |
 | Robot & canvas | head yaw / pitch, cone angle, head tracks human, entropy | `inputs.*` | 0, 0, 60°, off, 0 | [viz.js:68](static/viz.js#L68) |
-| Render | base / focus particles, robot, view cone, human column, HUD | `params.show*` | all on | [viz.js:118](static/viz.js#L118) |
+| Render | base / focus particles, robot, view cone, human column, HUD | `params.show*` | all on | [viz.js:122](static/viz.js#L122) |
 | Tuning → Swarm | base particles | `params.particles` | 4000 | [viz.js:97](static/viz.js#L97) |
 | | focus density (per cone point, ×1–15 with velocity) | `params.focusDensity` | 0.12 | [viz.js:98](static/viz.js#L98) |
 | | attraction (spring to the surface) | `params.attraction` | 0.8 | [viz.js:99](static/viz.js#L99) |
@@ -31,8 +31,12 @@ Defaults live in `params` / `inputs` in [static/viz.js](static/viz.js#L61).
 | | cone paint (robot channel), paint colour | `params.paintMode`, `paintColor` | time of flight | [viz.js:113](static/viz.js#L113) |
 | | human channel on/off | `params.humanChannel` | on | [viz.js:115](static/viz.js#L115) |
 | | view range, desaturate | `params.fovRange`, `desaturate` | 4 m, 3 s | [viz.js:116](static/viz.js#L116) |
+| | saturation floor (in-cone saturation at posture confidence 0) | `params.saturationFloor` | 0.4 | [viz.js:118](static/viz.js#L118) |
+| | saturation boost (robot and human channel) | `params.saturationBoost` | 1.5 | [viz.js:119](static/viz.js#L119) |
+| | base gray (brightness outside the cone) | `params.baseGray` | 0.48 | [viz.js:120](static/viz.js#L120) |
+| | background | `params.background` | `#0a0a0b` | [viz.js:121](static/viz.js#L121) |
 | Tuning → Markers | changes / s, outline chance, max inflation | `params.markerChange`, `outlineChance`, `markerInflate` | 0.2, 0.3, 3× | [viz.js:105](static/viz.js#L105) |
-| Tuning → Camera | auto-rotate, rotate speed (+ the view itself) | `params.autoRotate`, `rotateSpeed` | on, 0.15 | [viz.js:124](static/viz.js#L124) |
+| Tuning → Camera | auto-rotate, rotate speed (+ the view itself) | `params.autoRotate`, `rotateSpeed` | on, 0.15 | [viz.js:128](static/viz.js#L128) |
 
 ## 2. Input → visual mapping (code)
 
@@ -43,12 +47,13 @@ The response curves of the spec, all in `deriveFromInputs` ([viz.js:83](static/v
 | distance → jitter | 1/d², 1 at ≤ 1 m, 0 at ≥ 3 m | [viz.js:85](static/viz.js#L85) |
 | distance → tearing | 0 at 1 m, 1 at 0.3 m | [viz.js:86](static/viz.js#L86) |
 | velocity → focus density | 1 + 14·velocity | [viz.js:87](static/viz.js#L87) |
-| entropy → dispersion, confidence → saturation, scale → marker share | 1:1 | [viz.js:88](static/viz.js#L88) |
+| entropy → dispersion, scale → marker share | 1:1 | [viz.js:88](static/viz.js#L88) |
+| confidence → saturation | floor + (1 − floor)·confidence | [viz.js:89](static/viz.js#L89) |
 | engagement (human-channel weight) | 1 − (1 − jitter)(1 − velocity) | [viz.js:92](static/viz.js#L92) |
-| dual-stream screen blend | 1 − (1 − (1−w)·robot)(1 − w·human) | [viz.js:824](static/viz.js#L824) |
-| confidence desaturation and fade from gray | | [viz.js:826](static/viz.js#L826) |
-| base gray level (outside the cone) | 0.42 + 0.08·height + speed | [viz.js:816](static/viz.js#L816) |
-| marker size distribution | 1 + (max − 1)·r² | [viz.js:808](static/viz.js#L808) |
+| dual-stream screen blend | 1 − (1 − (1−w)·robot)(1 − w·human) | [viz.js:827](static/viz.js#L827) |
+| saturation (× boost, clamped) and fade from gray | | [viz.js:830](static/viz.js#L830) |
+| base gray level (outside the cone) | baseGray + 0.08·height + speed | [viz.js:819](static/viz.js#L819) |
+| marker size distribution | 1 + (max − 1)·r² | [viz.js:811](static/viz.js#L811) |
 
 ## 3. Constants in the renderer
 
@@ -69,12 +74,12 @@ The response curves of the spec, all in `deriveFromInputs` ([viz.js:83](static/v
 | `VIGNETTE_EDGE` | 0.7–1.3 box half-sizes | Soft edge of the human-channel vignette | [52](static/viz.js#L52) |
 | `VIGNETTE_DEPTH` | ±0.4–0.9 m | Depth window around the human | [53](static/viz.js#L53) |
 | `BOX_STALE`, `HUMAN_WIDTH` | 2 s, 0.5 m | Fallback to the simulated human's box | [54](static/viz.js#L54) |
-| `BACKGROUND` | `#1a1b1e` | Clear colour (also `--bg` in [index.html](static/index.html#L8)) | [128](static/viz.js#L128) |
-| `REMOTE_EASE` | 0.5 s | How fast live inputs are eased in | [133](static/viz.js#L133) |
-| `SCALE_MARKERS` | diamond, crosshair | Marker shapes used for the scale input | [205](static/viz.js#L205) |
-| `minSize` | 2 px | Smallest drawn point | [281](static/viz.js#L281) |
-| helper opacities | 0.06 cone, 0.12 human | View cone and human column | [358](static/viz.js#L358), [380](static/viz.js#L380) |
-| `PALETTE`, `VIRIDIS` | | Height and time-of-flight colour ramps | [483](static/viz.js#L483) |
+| `--bg` | `#0a0a0b` | Page colour before the first frame; the panel's *background* overrides it | [index.html:8](static/index.html#L8) |
+| `REMOTE_EASE` | 0.5 s | How fast live inputs are eased in | [136](static/viz.js#L136) |
+| `SCALE_MARKERS` | diamond, crosshair | Marker shapes used for the scale input | [208](static/viz.js#L208) |
+| `minSize` | 2 px | Smallest drawn point | [284](static/viz.js#L284) |
+| helper opacities | 0.06 cone, 0.12 human | View cone and human column | [361](static/viz.js#L361), [383](static/viz.js#L383) |
+| `PALETTE`, `VIRIDIS` | | Height and time-of-flight colour ramps | [486](static/viz.js#L486) |
 
 ## 4. Live data (environment variables)
 
