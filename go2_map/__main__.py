@@ -15,7 +15,10 @@ free before are shown separately as "moving".
 Map points are also coloured from the front camera (bridge PUB port 5556): a
 few times per second the newest frame is shrunk, blurred heavily (so pose
 timing and calibration errors only shift soft gradients) and the map points in
-view are projected into it with the SLAM pose. A coarse depth buffer, which
+view are projected into it with the SLAM pose and the camera model
+(GO2_CAMERA_MODEL / _HFOV / _PITCH / _YAW, fitted by python -m go2_map.calibrate).
+Samples are weighted by their saturation, so gray misses from a slightly
+misaligned frame don't wash out a coloured object. A coarse depth buffer, which
 also holds the latest scan, keeps surfaces hidden behind others (or behind a
 person) from taking their colour. Each point keeps a running average. Frames
 are skipped while the robot turns fast or the pose is stale.
@@ -69,16 +72,25 @@ LIDAR_OFFSET = np.array([0.28945, 0.0, -0.046825])
 # colours from the front camera
 MAP_COLOR = os.getenv("GO2_MAP_COLOR", "1") == "1"
 MAP_COLOR_HZ = float(os.getenv("GO2_MAP_COLOR_HZ", "3"))  # camera frames used per second
-MAP_COLOR_BLUR = float(os.getenv("GO2_MAP_COLOR_BLUR", "0.03"))  # blur sigma, fraction of the image width
+MAP_COLOR_BLUR = float(os.getenv("GO2_MAP_COLOR_BLUR", "0.012"))  # blur sigma, fraction of the image width
 MAP_COLOR_RANGE = float(os.getenv("GO2_MAP_COLOR_RANGE", "5"))  # m, farther points are not coloured
-CAMERA_HFOV = float(os.getenv("GO2_CAMERA_HFOV", "120"))  # horizontal field of view of the front camera (°)
-CAMERA_PITCH = float(os.getenv("GO2_CAMERA_PITCH", "0"))  # ° the front camera looks down
+# front camera model; python -m go2_map.calibrate fits these from a coloured object in view. Defaults: a
+# one-shot calibration on the robot (2026-10-25, 18 px error); add shots near the image edges to refine
+CAMERA_MODEL = os.getenv("GO2_CAMERA_MODEL", "fisheye")  # "pinhole" or "fisheye" (equidistant, r = f·θ)
+CAMERA_HFOV = float(os.getenv("GO2_CAMERA_HFOV", "95.5"))  # horizontal field of view of the front camera (°)
+CAMERA_PITCH = float(os.getenv("GO2_CAMERA_PITCH", "-1.8"))  # ° the front camera looks down
+CAMERA_YAW = float(os.getenv("GO2_CAMERA_YAW", "3.1"))  # ° the camera looks left of the SLAM pose's heading
 CAMERA_POS = np.array([0.32715, 0.0, 0.04297])  # front camera in the body frame (URDF)
 COLOR_WIDTH = 160  # px, frames are shrunk to this width before blurring and sampling
 COLOR_MAX_TURN = 0.6  # rad/s, frames taken while turning faster are skipped (blur, pose lag)
 COLOR_POSE_AGE = 0.3  # s, frames are skipped when the newest pose is older
 COLOR_OCCLUSION = 0.25  # m behind the nearest surface in a depth-buffer cell that still counts as visible
 COLOR_MIN_RATE = 0.1  # share of each new sample in a point's colour at least, so colours follow lighting
+# Samples are weighted by their own saturation: misaligned frames mostly sample the gray surroundings of a
+# coloured object, and an even average of those turns it gray. A sample at saturation ≥ COLOR_SAT_FULL counts
+# fully, a gray one only COLOR_GRAY_WEIGHT as much.
+COLOR_SAT_FULL = 0.4
+COLOR_GRAY_WEIGHT = 0.15
 COLOR_FULL_SEEN = 3  # observations for full alpha
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -154,14 +166,30 @@ def turn_rate(a: dict, b: dict) -> float:
     return 2 * math.acos(min(dot, 1.0)) / dt if dt > 0 else 0.0
 
 
-def to_camera(points: np.ndarray, odom: dict) -> np.ndarray:
+def to_camera(points: np.ndarray, odom: dict, yaw: float = CAMERA_YAW, pitch: float = CAMERA_PITCH) -> np.ndarray:
     """World points → camera frame: x right, y down, z forward (m)."""
     qx, qy, qz, qw = odom["orientation"]
     c = rotate([-qx, -qy, -qz, qw], points - np.asarray(odom["position"])) - CAMERA_POS
-    pitch = math.radians(CAMERA_PITCH)
-    forward = c[:, 0] * math.cos(pitch) - c[:, 2] * math.sin(pitch)
-    up = c[:, 0] * math.sin(pitch) + c[:, 2] * math.cos(pitch)
-    return np.stack([-c[:, 1], -up, forward], axis=1)
+    cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+    x, y = c[:, 0] * cy + c[:, 1] * sy, -c[:, 0] * sy + c[:, 1] * cy  # camera turned left by yaw
+    cp, sp = math.cos(math.radians(pitch)), math.sin(math.radians(pitch))
+    forward, up = x * cp - c[:, 2] * sp, x * sp + c[:, 2] * cp  # camera tilted down by pitch
+    return np.stack([-y, -up, forward], axis=1)
+
+
+def camera_pixels(cam: np.ndarray, width: int, height: int, hfov: float = CAMERA_HFOV,
+                  model: str = CAMERA_MODEL) -> tuple[np.ndarray, np.ndarray]:
+    """Camera-frame points → pixel coordinates (float) in a width × height image; nan behind the camera."""
+    x, y, z = cam[:, 0], cam[:, 1], cam[:, 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if model == "fisheye":  # equidistant: distance from the centre ∝ angle from the optical axis
+            focal = (width / 2) / math.radians(hfov / 2)
+            rho = np.hypot(x, y)
+            scale = np.where(rho > 1e-9, np.arctan2(rho, z) / rho, 1 / np.maximum(z, 1e-9))
+        else:
+            focal = (width / 2) / math.tan(math.radians(hfov / 2))
+            scale = np.where(z > 0, 1 / z, np.nan)
+    return width / 2 + focal * x * scale, height / 2 + focal * y * scale
 
 
 def colorize(voxels: VoxelMap, jpeg: bytes, odom: dict, scan: np.ndarray) -> int:
@@ -171,16 +199,15 @@ def colorize(voxels: VoxelMap, jpeg: bytes, odom: dict, scan: np.ndarray) -> int
     image = image.resize((width, height), Image.BILINEAR)
     image = image.filter(ImageFilter.GaussianBlur(MAP_COLOR_BLUR * width))
     pixels = np.asarray(image, dtype=np.float32) / 255
-    focal = (width / 2) / math.tan(math.radians(CAMERA_HFOV) / 2)
 
     def project(points: np.ndarray):
         cam = to_camera(points, odom)
-        z = cam[:, 2]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            u = width / 2 + focal * cam[:, 0] / z
-            v = height / 2 + focal * cam[:, 1] / z
-        ok = (z > 0.1) & (z < MAP_COLOR_RANGE) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
-        return u.astype(int), v.astype(int), z, ok
+        u, v = camera_pixels(cam, width, height)
+        z = np.linalg.norm(cam, axis=1)  # distance along the ray, for the depth buffer
+        with np.errstate(invalid="ignore"):
+            ok = (cam[:, 2] > 0.1) & (z < MAP_COLOR_RANGE) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+        u, v = np.where(ok, u, 0).astype(int), np.where(ok, v, 0).astype(int)
+        return u, v, z, ok
 
     near = np.flatnonzero(np.linalg.norm(voxels.points[:, :2] - np.asarray(odom["position"][:2]), axis=1)
                           < MAP_COLOR_RANGE)
@@ -197,8 +224,13 @@ def colorize(voxels: VoxelMap, jpeg: bytes, odom: dict, scan: np.ndarray) -> int
     visible = z <= depth[v // 2, u // 2] + COLOR_OCCLUSION
     near, u, v = near[visible], u[visible], v[visible]
 
-    rate = np.maximum(1 / (voxels.seen[near] + 1), COLOR_MIN_RATE)[:, None]
-    voxels.rgb[near] += (pixels[v, u] - voxels.rgb[near]) * rate
+    sample = pixels[v, u]
+    hi, lo = sample.max(axis=1), sample.min(axis=1)
+    sat = np.where(hi > 0, (hi - lo) / np.maximum(hi, 1e-6), 0)
+    weight = COLOR_GRAY_WEIGHT + (1 - COLOR_GRAY_WEIGHT) * np.minimum(sat / COLOR_SAT_FULL, 1)
+    rate = np.maximum(1 / (voxels.seen[near] + 1), COLOR_MIN_RATE) * weight
+    rate[voxels.seen[near] == 0] = 1  # a point's first sample is taken as it is
+    voxels.rgb[near] += (sample - voxels.rgb[near]) * rate[:, None]
     voxels.seen[near] += 1
     return len(near)
 

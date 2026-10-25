@@ -51,8 +51,11 @@ BRIDGE_HOST = os.getenv("GO2_BRIDGE_HOST", "localhost")
 SLAM_PORT = int(os.getenv("GO2_ZMQ_SLAM_PORT", "5559"))
 
 FEED_HZ = 10
-CAMERA_HFOV = float(os.getenv("GO2_CAMERA_HFOV", "120"))  # horizontal field of view of the front camera (°)
-CAMERA_PITCH = float(os.getenv("GO2_CAMERA_PITCH", "0"))  # ° the front camera looks down
+# front camera model, shared with go2_map (fitted by python -m go2_map.calibrate; same defaults)
+CAMERA_MODEL = os.getenv("GO2_CAMERA_MODEL", "fisheye")  # "pinhole" or "fisheye" (equidistant)
+CAMERA_HFOV = float(os.getenv("GO2_CAMERA_HFOV", "95.5"))  # horizontal field of view of the front camera (°)
+CAMERA_PITCH = float(os.getenv("GO2_CAMERA_PITCH", "-1.8"))  # ° the front camera looks down
+CAMERA_YAW = float(os.getenv("GO2_CAMERA_YAW", "3.1"))  # ° the camera looks left of the body's heading
 FEED_PERSON_H = float(os.getenv("GO2_FEED_PERSON_H", "1.7"))  # assumed body height (m)
 FEED_TORSO = float(os.getenv("GO2_FEED_TORSO", "0.5"))  # assumed shoulder-to-hip length (m)
 FEED_CONF = float(os.getenv("GO2_FEED_CONF", "0.5"))  # minimum person detection confidence
@@ -183,14 +186,21 @@ class Feed:
         ts, w, h = msg["ts"], msg["width"], msg["height"]
         x1, y1, x2, y2 = person["box"]
         box_h = max(y2 - y1, 1.0)
-        focal = (w / 2) / math.tan(math.radians(CAMERA_HFOV) / 2)  # px, square pixels assumed
+        # px per unit of tan(angle) (pinhole) or per radian (fisheye); square pixels assumed
+        if CAMERA_MODEL == "fisheye":
+            focal = (w / 2) / math.radians(CAMERA_HFOV / 2)
+        else:
+            focal = (w / 2) / math.tan(math.radians(CAMERA_HFOV) / 2)
         kpts = np.array(person.get("keypoints") or np.zeros((0, 3)), dtype=float).reshape(-1, 3)
 
-        def bearing(x: float) -> float:  # ° from the camera axis, + = left
-            return 0.0 - math.degrees(math.atan((x - w / 2) / focal))
+        def angle(offset: float) -> float:  # ° from the optical axis for a pixel offset from the centre
+            return math.degrees(offset / focal if CAMERA_MODEL == "fisheye" else math.atan(offset / focal))
+
+        def bearing(x: float) -> float:  # ° from the body's heading, + = left
+            return 0.0 - angle(x - w / 2) + CAMERA_YAW
 
         def elevation(y: float) -> float:  # ° above the horizontal (the camera looks down by CAMERA_PITCH)
-            return 0.0 - math.degrees(math.atan((y - h / 2) / focal)) - CAMERA_PITCH
+            return 0.0 - angle(y - h / 2) - CAMERA_PITCH
 
         out = {"trackHuman": True, "headYaw": 0.0, "headPitch": 0.0}
         out["humanBearing"] = bearing((x1 + x2) / 2)

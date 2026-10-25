@@ -119,6 +119,7 @@ const params = {
   coneFade: 3,        // s for a focus particle to fade out once the cone has moved away from it
   saturationFloor: 0.4, // in-cone saturation at posture confidence 0 (1 at confidence 1)
   saturationBoost: 1.5, // pushes in-cone colours (robot and human channel) away from their gray
+  cameraAuto: true,   // set gate and boost from each map's own camera colours (below: the manual values)
   cameraBoost: 2.5,   // exaggerates the camera colours' saturation (applied once per map, before blending)
   cameraGate: 0.15,   // camera colours below this saturation (HSV) turn gray instead of being boosted
   baseGray: 0.48,     // brightness of the base particles outside the cone
@@ -521,15 +522,39 @@ function isFocus(i) { return i >= BASE_MAX; }
 // tints of gray surfaces (blur, white balance, noise) turn gray instead of being boosted into a chromatic
 // mess; colours above the gate get their saturation multiplied by cameraBoost.
 const CAMERA_GATE_SOFTNESS = 0.1; // saturation range over which the gate opens
+// auto: the gate sits at this quantile of the map's camera saturations (rooms are mostly neutral), and the
+// boost lifts the CAMERA_AUTO_TOP quantile to CAMERA_AUTO_TARGET saturation
+const CAMERA_AUTO_GATE = 0.5, CAMERA_AUTO_TOP = 0.95, CAMERA_AUTO_TARGET = 0.8, CAMERA_AUTO_MAX_BOOST = 6;
+const cameraLevels = { gate: 0, boost: 1 };  // in use, shown in the HUD
+
+function cameraSaturation(i) {
+  const r = rawRGBA[i * 4], g = rawRGBA[i * 4 + 1], b = rawRGBA[i * 4 + 2], max = Math.max(r, g, b);
+  return max > 0 ? (max - Math.min(r, g, b)) / max : 0;
+}
 
 function applyCameraColors() {
   if (!rawRGBA) return;
-  const lo = params.cameraGate, hi = params.cameraGate + CAMERA_GATE_SOFTNESS;
+  cameraLevels.gate = params.cameraGate;
+  cameraLevels.boost = params.cameraBoost;
+  if (params.cameraAuto) {
+    const sats = [];
+    for (let k = 0; k < targetCount; k++) {
+      const i = targetSource[k];
+      if (rawRGBA[i * 4 + 3] > 0) sats.push(cameraSaturation(i));
+    }
+    if (sats.length > 50) {
+      sats.sort((a, b) => a - b);
+      cameraLevels.gate = sats[Math.floor((sats.length - 1) * CAMERA_AUTO_GATE)];
+      const top = sats[Math.floor((sats.length - 1) * CAMERA_AUTO_TOP)];
+      cameraLevels.boost = THREE.MathUtils.clamp(CAMERA_AUTO_TARGET / Math.max(top, 0.01), 1, CAMERA_AUTO_MAX_BOOST);
+    }
+  }
+  const lo = cameraLevels.gate, hi = cameraLevels.gate + CAMERA_GATE_SOFTNESS;
   for (let k = 0; k < targetCount; k++) {
     const i = targetSource[k];
     const r = rawRGBA[i * 4] / 255, g = rawRGBA[i * 4 + 1] / 255, b = rawRGBA[i * 4 + 2] / 255;
-    const max = Math.max(r, g, b), sat = max > 0 ? (max - Math.min(r, g, b)) / max : 0;
-    const gain = THREE.MathUtils.smoothstep(sat, lo, hi) * params.cameraBoost;
+    const sat = cameraSaturation(i);
+    const gain = THREE.MathUtils.smoothstep(sat, lo, hi) * cameraLevels.boost;
     const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     targetRGB[k * 3] = THREE.MathUtils.clamp(lum + (r - lum) * gain, 0, 1);
     targetRGB[k * 3 + 1] = THREE.MathUtils.clamp(lum + (g - lum) * gain, 0, 1);
@@ -961,7 +986,8 @@ lookFolder.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.uni
 lookFolder.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.uniforms.opacity.value = v; });
 lookFolder.add(params, "saturationFloor", 0, 1, 0.01).name("saturation floor");
 lookFolder.add(params, "saturationBoost", 0.5, 3, 0.05).name("saturation boost");
-lookFolder.add(params, "cameraBoost", 0, 5, 0.05).name("camera boost").onChange(applyCameraColors);
+lookFolder.add(params, "cameraAuto").name("camera auto").onChange(applyCameraColors);
+lookFolder.add(params, "cameraBoost", 0, 6, 0.05).name("camera boost").onChange(applyCameraColors);
 lookFolder.add(params, "cameraGate", 0, 0.8, 0.01).name("camera gate").onChange(applyCameraColors);
 lookFolder.add(params, "baseGray", 0.1, 0.9, 0.01).name("base gray");
 lookFolder.addColor(params, "background").onChange(applyBackground);
@@ -1124,7 +1150,7 @@ function updateHud(now) {
   hud.robotsrc.textContent = robotSource;
   hud.cone.textContent = coneList.length.toLocaleString();
   hud.focus.textContent = `${visibleFocus.toLocaleString()} (×${derived.focusFactor.toFixed(1)})`;
-  hud.mapping.textContent = `jitter ${derived.jitter.toFixed(2)}${derived.tear > 0 ? " tear" : ""} · disp ${derived.dispersion.toFixed(2)} · sat ${derived.saturation.toFixed(2)} · markers ${derived.markerRatio.toFixed(2)}${mapHasRGB ? ` · human ${derived.engagement.toFixed(2)} (${box.source} box)` : ""}`;
+  hud.mapping.textContent = `jitter ${derived.jitter.toFixed(2)}${derived.tear > 0 ? " tear" : ""} · disp ${derived.dispersion.toFixed(2)} · sat ${derived.saturation.toFixed(2)} · markers ${derived.markerRatio.toFixed(2)}${mapHasRGB ? ` · human ${derived.engagement.toFixed(2)} (${box.source} box) · camera gate ${cameraLevels.gate.toFixed(2)} ×${cameraLevels.boost.toFixed(1)}` : ""}`;
   hud.remote.textContent = remoteUpdated ? `${((now - remoteUpdated) / 1000).toFixed(1)} s ago` : "–";
   // keep the panel in sync while robot data is moving the sliders
   if (remoteUpdated && now - remoteUpdated < REMOTE_EASE * 10 * 1000) {
