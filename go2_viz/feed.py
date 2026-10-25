@@ -7,7 +7,8 @@ per second:
 
     humanBearing  box centre's offset from the image centre, through the camera's field of view
     distance      LiDAR: the nearest cluster of scan points in the person's direction (the middle
-                  half of the box, as seen from the camera), measured from the body centre.
+                  half of the box, as seen from the camera), measured from the body centre, unless it
+                  lies beyond twice the camera estimate (then it is the wall behind the person).
                   Fallback without LiDAR points: pinhole estimate from the torso length
                   (shoulders → hips) and the box height, the nearer of the two (both err on the
                   far side when the person is cut off or bends)
@@ -69,6 +70,9 @@ LIDAR_MIN_HEIGHT = 0.5  # m, vertical extent a cluster needs to count as a perso
 LIDAR_VOXEL = 0.05  # m; merged scans repeat static points, so clusters count distinct voxels
 LIDAR_BAND = (-0.15, 1.5)  # m, body-frame heights searched: above the floor (≈ -0.3), up to head height
 LIDAR_MIN_SECTOR = 3.0  # °, half-width of the searched sector at least
+# a LiDAR cluster farther than this × the camera estimate (+0.3 m) is something behind the person: the
+# L1 sees little of a close person. Relative, because the camera estimate is rough (uncalibrated FOV).
+LIDAR_BEYOND_CAMERA = 2.0
 CAMERA_POS = np.array([0.32715, 0.0, 0.04297])  # front camera in the body frame (URDF)
 ENTROPY_BINS = 8
 SMOOTH = 0.3  # share of a new velocity sample per update (keypoints are noisy)
@@ -202,6 +206,8 @@ class Feed:
         if self.lidar is not None:
             half = max((bearing(x1) - bearing(x2)) / 4, LIDAR_MIN_SECTOR)  # middle half of the box
             measured = self.lidar.distance(out["humanBearing"] + half, out["humanBearing"] - half)
+        if measured is not None and measured > LIDAR_BEYOND_CAMERA * min(estimates) + 0.3:
+            measured = None
         self.distance_source = "lidar" if measured is not None else "camera"
         out["distance"] = clamp(measured if measured is not None else min(estimates), 0.3, 5.0)
 
