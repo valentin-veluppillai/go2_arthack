@@ -361,6 +361,8 @@ def main() -> None:
     jpeg: bytes | None = None  # newest camera frame, not used yet
     t_colored = 0.0
     colored = 0  # points coloured since the last log line
+    bad_frames = 0  # undecodable camera frames since the last warning
+    t_bad_warned = 0.0
     moving = np.empty((0, 3), dtype=np.float32)
     path: list[list[float]] = []
     z_ref: float | None = None  # robot height at the first pose, reference for the ceiling cut
@@ -412,8 +414,15 @@ def main() -> None:
                     and now - t_colored >= 1.0 / MAP_COLOR_HZ):
                 # a frame taken while turning fast is blurred and lags the pose: skip it
                 if now - t_odom < COLOR_POSE_AGE and turning < COLOR_MAX_TURN:
-                    colored += colorize(voxels, jpeg, odom, scan)
-                    t_colored, dirty = now, True
+                    try:
+                        colored += colorize(voxels, jpeg, odom, scan)
+                        dirty = True
+                    except OSError as exc:  # truncated or corrupt JPEG from the camera: skip the frame
+                        bad_frames += 1
+                        if now - t_bad_warned > 10:
+                            log.warning("Skipped %d unreadable camera frame(s): %s", bad_frames, exc)
+                            bad_frames, t_bad_warned = 0, now
+                    t_colored = now
                 jpeg = None
 
             if dirty and now - t_logged >= 1.0 / MAP_LOG_HZ:
