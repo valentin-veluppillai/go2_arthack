@@ -252,7 +252,7 @@ The window shows the annotated camera feed, the turn zones (yellow lines) and th
 | Human **movement / velocity** | 0 – 1 | **Density in the view cone**: focus particles ×1 (sparse trickle) to ×15 (burst) |
 | Interaction **entropy** | 0 – 1 | **Dispersion** of the focus particles: on the surface at 0, an aerosol cloud up to 0.5 m off the surfaces at 1 |
 | Posture **confidence** | 0 – 1 | **Saturation** of the in-cone colouring: monochrome at 0, full colour at 1 |
-| Perceived human **scale** | 0 – 1 | Share of particles drawn as **diamond / crosshair** markers instead of circles |
+| Perceived human **scale** | 0 – 1 | Share of particles drawn as **diamond / crosshair** markers instead of circles; each marker is inflated by a random amount (1× up to *max inflation*, 3× by default, mostly modest) |
 | Head **yaw / pitch**, **cone angle** | °, 15 – 90° | **Zone of interest**: particles inside the cone take on a faked time-of-flight colour (viridis by distance from the head); outside they decay back to gray |
 | **Proximity** and **gesture velocity** (engagement), human **bounding box** | 0 – 1, ° | **Dual-stream colour** around the human: see below |
 

@@ -104,6 +104,7 @@ const params = {
   wander: 0.004,      // chance per frame to hop to a neighbouring map point
   markerChange: 0.2,  // marker changes per second for each marker particle
   outlineChance: 0.3, // chance that a newly drawn diamond is outline only
+  markerInflate: 3,   // markers are drawn up to this many times larger than circles (random per marker)
   floorShare: 0.15,   // share of base particles on the floor; the rest go to walls and objects
   size: 0.05,
   opacity: 0.55,
@@ -183,6 +184,7 @@ const dispersal = new Float32Array(MAX_PARTICLES * 3);   // baked dispersion dir
 // so a changing scale adds or removes markers instead of reshuffling all of them
 const markerRoll = Float32Array.from({ length: MAX_PARTICLES }, Math.random);
 const markerTile = new Float32Array(MAX_PARTICLES).fill(-1);
+const inflate = new Float32Array(MAX_PARTICLES).fill(1);  // size factor: 1 for circles, random for markers
 
 const geometry = new THREE.BufferGeometry();
 geometry.setAttribute("position", new THREE.BufferAttribute(drawn, 3).setUsage(THREE.DynamicDrawUsage));
@@ -190,6 +192,7 @@ geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3).setUsage(THR
 geometry.setAttribute("alpha", new THREE.BufferAttribute(alpha, 1).setUsage(THREE.DynamicDrawUsage));
 // atlas tile per particle: -1 = plain circle, otherwise 2 × marker index (+1 = outline only)
 geometry.setAttribute("tile", new THREE.BufferAttribute(markerTile, 1).setUsage(THREE.DynamicDrawUsage));
+geometry.setAttribute("inflate", new THREE.BufferAttribute(inflate, 1).setUsage(THREE.DynamicDrawUsage));
 geometry.setDrawRange(0, MAX_PARTICLES);
 
 // ── markers (after matplotlib's marker set) ──────────────────────
@@ -281,6 +284,7 @@ const material = new THREE.ShaderMaterial({
     attribute vec3 color;
     attribute float alpha;
     attribute float tile;
+    attribute float inflate;
     uniform float size;
     uniform float scale;
     uniform float minSize;
@@ -292,7 +296,7 @@ const material = new THREE.ShaderMaterial({
       vAlpha = alpha;
       vTile = tile;
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = alpha > 0.0 ? max(size * scale / -mv.z, minSize) : 0.0;
+      gl_PointSize = alpha > 0.0 ? max(size * scale / -mv.z, minSize) * inflate : 0.0;
       gl_Position = projectionMatrix * mv;
     }`,
   fragmentShader: /* glsl */ `
@@ -793,8 +797,13 @@ function step(dt, time) {
     const inside = d2 < range2 && along > 0 && along * along >= cosHalf * cosHalf * d2;
     const sat = saturation[i] = inside ? Math.min(1, saturation[i] + gain) : Math.max(0, saturation[i] - loss);
 
-    if (markerRoll[i] >= derived.markerRatio) markerTile[i] = -1;
-    else if (markerTile[i] < 0 || Math.random() < markerSwitch) markerTile[i] = randomMarkerTile();
+    if (markerRoll[i] >= derived.markerRatio) { markerTile[i] = -1; inflate[i] = 1; }
+    else if (markerTile[i] < 0 || Math.random() < markerSwitch) {
+      markerTile[i] = randomMarkerTile();
+      // every new marker gets its own size; squared, so most stay modest and a few are large
+      const r = Math.random();
+      inflate[i] = 1 + (params.markerInflate - 1) * r * r;
+    }
 
     const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
     const glow = 0.45 + Math.min(speed * 0.6, 1.2);
@@ -827,6 +836,7 @@ function step(dt, time) {
   geometry.attributes.color.needsUpdate = true;
   geometry.attributes.alpha.needsUpdate = true;
   geometry.attributes.tile.needsUpdate = true;
+  geometry.attributes.inflate.needsUpdate = true;
 }
 
 // ── UI ───────────────────────────────────────────────────────────
@@ -875,6 +885,7 @@ lookFolder.add(params, "desaturate", 0.2, 10, 0.1).name("desaturate (s)");
 const markerFolder = tuning.addFolder("Markers");
 markerFolder.add(params, "markerChange", 0, 5, 0.05).name("changes / s");
 markerFolder.add(params, "outlineChance", 0, 1, 0.01).name("outline chance");
+markerFolder.add(params, "markerInflate", 1, 6, 0.1).name("max inflation");
 const cam = tuning.addFolder("Camera");
 cam.add(params, "autoRotate");
 cam.add(params, "rotateSpeed", -3, 3, 0.1);
