@@ -198,9 +198,11 @@ Indoor ceilings would cover the map, so points more than 1.5 m above the robot's
 
 **Moving objects.** People walking past the robot would leave trails ("ghosts") in the map. `go2_map` keeps a 10 cm occupancy grid next to the map: every scan ray marks the space it passes through as free, so cells that were only briefly occupied are cleared again, while walls and furniture keep getting hit. Scan points that land in space seen free before are drawn in magenta as `world/moving`, which shows people while they are there. Turn the filter off with `GO2_MAP_FILTER=0`.
 
-**Map stream.** `go2_map` also publishes the cleaned map once per second on port 5560 as `[b"occupancy", meta_json, float32 xyz]` (meta: `stamp`, `count`, `voxel`, `z_ref`, `robot` pose) for other apps such as `go2_viz`.
+**Camera colours.** `go2_map` also colours the map from the front camera (bridge port 5556). Up to 3 times per second (`GO2_MAP_COLOR_HZ`) the newest frame is shrunk to 160 px wide and blurred heavily (`GO2_MAP_COLOR_BLUR`, sigma 3 % of the width), so pose timing and calibration errors only shift soft gradients. The map points within 5 m (`GO2_MAP_COLOR_RANGE`) are projected into it with the SLAM pose, through the camera's position from the URDF, its field of view (`GO2_CAMERA_HFOV`, 120° until calibrated) and downward tilt (`GO2_CAMERA_PITCH`, 0°); lens distortion is ignored. A coarse depth buffer that also holds the latest scan keeps surfaces behind others, or behind a person standing in front of them, from taking their colour. Each point keeps a running average, so colours settle over a few frames and follow slow lighting changes. Frames are skipped while the robot turns faster than 0.6 rad/s or the pose is older than 0.3 s. The viewer shows camera colours where a point has been seen and height colours elsewhere. Turn it off with `GO2_MAP_COLOR=0`.
 
-**PLY export.** When you stop `go2_map` with Ctrl+C it writes the whole map (moving objects removed, no ceiling cut) as a binary PLY with height colours, `go2_map_<timestamp>.ply` in the current directory. Set `GO2_MAP_PLY=path.ply` for a fixed name or `GO2_MAP_PLY=0` to skip it.
+**Map stream.** `go2_map` also publishes the cleaned map once per second on port 5560 as `[b"occupancy", meta_json, float32 xyz, uint8 rgba]` (meta: `stamp`, `count`, `voxel`, `z_ref`, `robot` pose; rgba: camera colour per point, alpha = how well it is known, 0 = never seen, 255 after 3 frames) for other apps such as `go2_viz`.
+
+**PLY export.** When you stop `go2_map` with Ctrl+C it writes the whole map (moving objects removed, no ceiling cut) as a binary PLY with camera colours (height colours where the camera never looked), `go2_map_<timestamp>.ply` in the current directory. Set `GO2_MAP_PLY=path.ply` for a fixed name or `GO2_MAP_PLY=0` to skip it.
 
 ### 7. YOLO Object Detection
 
@@ -270,7 +272,7 @@ Open http://localhost:8090. The panel has the test controls from the spec: **Hum
 
 - **Engagement** = 1 − (1 − proximity)(1 − velocity), where proximity is the jitter term (1 at ≤ 1 m, 0 at ≥ 3 m). Either closeness or movement engages, so the human channel dominates up close; far and still it is pure robot colour. The weights sum to 1, so the blend never washes out to white.
 - **Vignette**: the human channel only shows where the human is. Its shape is the human's bounding box as angles seen from the front camera (`boxLeft`/`boxRight`/`boxTop`/`boxBottom` from `go2_viz.feed`), a rounded rectangle that fades out from 0.7 to 1.3 box half-sizes, limited in depth to ±0.4–0.9 m around the human's distance so the wall behind them stays robot-coloured. Without box inputs for 2 s the simulated human column's box is used. The HUD shows the engagement and which box is in use.
-- **Human channel source**: live photographic colour from the camera is not wired up yet. For offline tests, `GO2_VIZ_TEXTURE=pattern` wraps a built-in test panorama around the middle of the map (12 hue sectors around the horizon, checkered in brightness every 15° of elevation); `GO2_VIZ_TEXTURE=room.jpg` uses an equirectangular image instead (needs Pillow). The texture is blurred heavily (`GO2_VIZ_BLUR`, sigma as a fraction of its width, default 3 %) so small misalignments only shift soft gradients; the live camera is meant to go through the same blur. **Tuning → Look → human channel** turns the blend off.
+- **Human channel source**: live, the camera colours `go2_map` gives each map point (see *Camera colours* above), weighted per point by how well each colour is known, so points the camera never saw stay pure robot colour. For offline tests with a map that has no colours, `GO2_VIZ_TEXTURE=pattern` wraps a built-in test panorama around the middle of the map (12 hue sectors around the horizon, checkered in brightness every 15° of elevation); `GO2_VIZ_TEXTURE=room.jpg` uses an equirectangular image instead (needs Pillow). The texture is blurred heavily (`GO2_VIZ_BLUR`, sigma as a fraction of its width, default 3 %) so small misalignments only shift soft gradients, like the camera frames in `go2_map`. **Tuning → Look → human channel** turns the blend off.
 
 ```bash
 GO2_VIZ_PLY=go2_map_20261024_175506.ply GO2_VIZ_TEXTURE=pattern python -m go2_viz
@@ -305,7 +307,7 @@ For testing from the shell: `python -m go2_viz.send distance=0.6 velocity=0.8 en
 
 | Input | Computed from |
 |-------|---------------|
-| `humanBearing` | Offset of the box centre from the image centre, through the camera's horizontal field of view (`GO2_FEED_HFOV`) |
+| `humanBearing` | Offset of the box centre from the image centre, through the camera's horizontal field of view (`GO2_CAMERA_HFOV`) |
 | `distance` | **LiDAR:** the nearest cluster of scan points in the person's direction (middle half of the box), at least 0.5 m tall, measured horizontally from the body centre. **Fallback** when there are no scans or no such cluster: pinhole estimate from the torso length (shoulders → hips, `GO2_FEED_TORSO`) and the box height (`GO2_FEED_PERSON_H`), the nearer of the two |
 | `scale` | Share of the frame the box covers, 1 at `GO2_FEED_SCALE_FULL` |
 | `confidence` | Mean keypoint confidence |
@@ -316,7 +318,7 @@ For testing from the shell: `python -m go2_viz.send distance=0.6 velocity=0.8 en
 
 Without a person for `GO2_FEED_LOST_S` the inputs go back to neutral (5 m, no movement, no confidence, scale 0, head straight ahead). The robot turning moves the whole image, so it counts as human movement.
 
-The LiDAR distance uses the SLAM stream (port 5559): uslam's world-frame scans from the last 0.5 s (`GO2_FEED_LIDAR_WINDOW_S`, the L1 is sparse) are moved into the body frame with uslam's own pose, so the frames always match. uslam only publishes while mapping, which `go2_map` starts. Points between 0.15 m above the floor and head height are searched, and clusters count distinct 5 cm voxels, so a single stray return repeated in every scan doesn't win. An object between the robot and the person (a chair, a table) is measured instead of the person. The log line shows once per second whether the distance came from `lidar` or `camera`; the camera estimate depends on `GO2_FEED_HFOV` and the body sizes, so calibrate those for the fallback.
+The LiDAR distance uses the SLAM stream (port 5559): uslam's world-frame scans from the last 0.5 s (`GO2_FEED_LIDAR_WINDOW_S`, the L1 is sparse) are moved into the body frame with uslam's own pose, so the frames always match. uslam only publishes while mapping, which `go2_map` starts. Points between 0.15 m above the floor and head height are searched, and clusters count distinct 5 cm voxels, so a single stray return repeated in every scan doesn't win. An object between the robot and the person (a chair, a table) is measured instead of the person. The log line shows once per second whether the distance came from `lidar` or `camera`; the camera estimate depends on `GO2_CAMERA_HFOV` and the body sizes, so calibrate those for the fallback.
 
 ```bash
 python -m go2_bridge          # terminal 1 (with GO2_NETWORK_INTERFACE set)
@@ -446,6 +448,10 @@ All settings via environment variables:
 | `GO2_FOLLOW_VYAW` | `0.7` | Turn speed (rad/s) |
 | `GO2_FOLLOW_CONF` | `0.5` | Minimum confidence for a person detection |
 | `GO2_MAP_PUB_PORT` | `5560` | Port on which `go2_map` publishes the cleaned map |
+| `GO2_MAP_COLOR` | `1` | Colour the map from the front camera |
+| `GO2_MAP_COLOR_HZ` | `3` | Camera frames used per second for colouring |
+| `GO2_MAP_COLOR_BLUR` | `0.03` | Blur of the camera frame before sampling (sigma, fraction of its width) |
+| `GO2_MAP_COLOR_RANGE` | `5` | Farthest map points coloured from the camera (m) |
 | `GO2_MAP_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_map` (for `go2_viz`) |
 | `GO2_VIZ_PLY` | — | Show this PLY file instead of the live map |
 | `GO2_VIZ_PORT` | `8090` | `go2_viz` web server port |
@@ -454,7 +460,8 @@ All settings via environment variables:
 | `GO2_VIZ_PARAM_HOST` | `localhost` | Host running `go2_viz` (for `go2_viz.feed` and `go2_viz.send`) |
 | `GO2_VIZ_TEXTURE` | — | Human colour channel for offline tests: `pattern` or an equirectangular image file |
 | `GO2_VIZ_BLUR` | `0.03` | Blur of the human channel texture (sigma, fraction of its width) |
-| `GO2_FEED_HFOV` | `120` | Horizontal field of view of the front camera (°), for bearing and distance |
+| `GO2_CAMERA_HFOV` | `120` | Horizontal field of view of the front camera (°): `go2_viz.feed` bearing/distance and `go2_map` colours |
+| `GO2_CAMERA_PITCH` | `0` | How far the front camera looks down (°), for `go2_viz.feed` box angles and `go2_map` colours |
 | `GO2_FEED_PERSON_H` | `1.7` | Assumed body height (m) for the distance estimate |
 | `GO2_FEED_TORSO` | `0.5` | Assumed shoulder-to-hip length (m) for the distance estimate |
 | `GO2_FEED_CONF` | `0.5` | Minimum confidence for a person detection |

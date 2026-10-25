@@ -18,8 +18,8 @@ per second:
                   0 = steady (still or moving evenly), 1 = erratic
     trackHuman    true while a person is seen; headYaw / headPitch stay 0 (the Go2 has no separate head)
     boxLeft, boxRight, boxTop, boxBottom
-                  the person's bounding box as angles from the camera axis (°, + = left / up,
-                  camera assumed level); go2_viz shapes the human-channel vignette with it
+                  the person's bounding box as angles seen from the camera (°, + = left / up, elevation
+                  from the horizontal); go2_viz shapes the human-channel vignette with it
 
 Without a person for GO2_FEED_LOST_S the inputs ease back to neutral
 (distance 5 m, no movement, no confidence, scale 0, head straight ahead).
@@ -50,7 +50,8 @@ BRIDGE_HOST = os.getenv("GO2_BRIDGE_HOST", "localhost")
 SLAM_PORT = int(os.getenv("GO2_ZMQ_SLAM_PORT", "5559"))
 
 FEED_HZ = 10
-FEED_HFOV = float(os.getenv("GO2_FEED_HFOV", "120"))  # horizontal field of view of the front camera (°)
+CAMERA_HFOV = float(os.getenv("GO2_CAMERA_HFOV", "120"))  # horizontal field of view of the front camera (°)
+CAMERA_PITCH = float(os.getenv("GO2_CAMERA_PITCH", "0"))  # ° the front camera looks down
 FEED_PERSON_H = float(os.getenv("GO2_FEED_PERSON_H", "1.7"))  # assumed body height (m)
 FEED_TORSO = float(os.getenv("GO2_FEED_TORSO", "0.5"))  # assumed shoulder-to-hip length (m)
 FEED_CONF = float(os.getenv("GO2_FEED_CONF", "0.5"))  # minimum person detection confidence
@@ -178,14 +179,14 @@ class Feed:
         ts, w, h = msg["ts"], msg["width"], msg["height"]
         x1, y1, x2, y2 = person["box"]
         box_h = max(y2 - y1, 1.0)
-        focal = (w / 2) / math.tan(math.radians(FEED_HFOV) / 2)  # px, square pixels assumed
+        focal = (w / 2) / math.tan(math.radians(CAMERA_HFOV) / 2)  # px, square pixels assumed
         kpts = np.array(person.get("keypoints") or np.zeros((0, 3)), dtype=float).reshape(-1, 3)
 
         def bearing(x: float) -> float:  # ° from the camera axis, + = left
             return 0.0 - math.degrees(math.atan((x - w / 2) / focal))
 
-        def elevation(y: float) -> float:  # ° from the camera axis, + = up
-            return 0.0 - math.degrees(math.atan((y - h / 2) / focal))
+        def elevation(y: float) -> float:  # ° above the horizontal (the camera looks down by CAMERA_PITCH)
+            return 0.0 - math.degrees(math.atan((y - h / 2) / focal)) - CAMERA_PITCH
 
         out = {"trackHuman": True, "headYaw": 0.0, "headPitch": 0.0}
         out["humanBearing"] = bearing((x1 + x2) / 2)

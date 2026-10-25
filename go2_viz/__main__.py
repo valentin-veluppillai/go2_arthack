@@ -24,17 +24,18 @@ ZMQ PUB socket to tcp://<this host>:5561 and send [b"viz", json] with any of
 The browser maps these to the visual parameters; the latest values are
 forwarded to every browser, which eases into them.
 
-Human channel colours: with GO2_VIZ_TEXTURE ("pattern" for a built-in test
-panorama, or an image file) every map point gets an RGB colour from that
-panorama, wrapped around the middle of the map and blurred by GO2_VIZ_BLUR
-(a fraction of the image width). The browser screen-blends it with the robot's
-time-of-flight colour inside the view cone. Live photographic colour from the
-camera is not wired up yet.
+Human channel colours: go2_map colours its points from the front camera and
+sends them as RGBA (alpha = how well a colour is known). For offline tests,
+GO2_VIZ_TEXTURE ("pattern" for a built-in test panorama, or an image file)
+colours maps that come without colours instead, wrapped around the middle of
+the map and blurred by GO2_VIZ_BLUR (a fraction of the image width). The
+browser screen-blends the colour with the robot's time-of-flight colour
+around the human inside the view cone.
 
 WebSocket messages: the map is binary (uint32 header length, JSON header,
 padding to a multiple of 4 bytes, then float32 x, y, z triples followed by
-float32 surface normals, then uint8 r, g, b triples if the header has
-"rgb": true); input updates are text, {"params": {...}}.
+float32 surface normals, then uint8 r, g, b, a per point if the header has
+"rgba": true); input updates are text, {"params": {...}}.
 """
 
 from __future__ import annotations
@@ -121,19 +122,22 @@ def estimate_normals(points: np.ndarray) -> np.ndarray:
     return vecs[:, :, 0].astype(np.float32)
 
 
-def encode(points: np.ndarray, meta: dict) -> bytes:
-    """Thin the cloud to VIZ_MAX_POINTS (evenly, so consecutive maps stay similar), add normals, pack it."""
+def encode(points: np.ndarray, meta: dict, rgba: np.ndarray | None = None) -> bytes:
+    """Thin the cloud to VIZ_MAX_POINTS (evenly, so consecutive maps stay similar), add normals and
+    colours (the map's own, else the test texture's), pack it."""
     if len(points) > VIZ_MAX_POINTS:
-        points = points[np.linspace(0, len(points) - 1, VIZ_MAX_POINTS).astype(int)]
+        keep = np.linspace(0, len(points) - 1, VIZ_MAX_POINTS).astype(int)
+        points = points[keep]
+        rgba = rgba[keep] if rgba is not None else None
     points = points.astype(np.float64)
     normals = estimate_normals(points)
-    rgb = b""
-    if panorama is not None and len(points):
-        rgb = texture.panorama_colors(points, panorama, texture.panorama_centre(points)).tobytes()
-    header = json.dumps({**meta, "count": len(points), "rgb": bool(rgb)}).encode()
+    if rgba is None and panorama is not None and len(points):
+        rgb = texture.panorama_colors(points, panorama, texture.panorama_centre(points))
+        rgba = np.concatenate([rgb, np.full((len(points), 1), 255, dtype=np.uint8)], axis=1)
+    header = json.dumps({**meta, "count": len(points), "rgba": rgba is not None}).encode()
     pad = (-(4 + len(header))) % 4
-    return (struct.pack("<I", len(header)) + header + b" " * pad
-            + points.astype("<f4").tobytes() + normals.astype("<f4").tobytes() + rgb)
+    return (struct.pack("<I", len(header)) + header + b" " * pad + points.astype("<f4").tobytes()
+            + normals.astype("<f4").tobytes() + (rgba.astype(np.uint8).tobytes() if rgba is not None else b""))
 
 
 async def broadcast(message: bytes) -> None:
@@ -191,10 +195,11 @@ async def zmq_source() -> None:
     log.info("Listening for go2_map on tcp://%s:%d", MAP_HOST, MAP_PUB_PORT)
     try:
         while True:
-            _topic, meta_raw, data = await sub.recv_multipart()
+            _topic, meta_raw, data, *colors = await sub.recv_multipart()
             meta = json.loads(meta_raw)
             points = np.frombuffer(data, dtype="<f4").reshape(-1, 3)
-            await broadcast(await asyncio.to_thread(encode, points, {**meta, "source": "go2_map"}))
+            rgba = np.frombuffer(colors[0], dtype=np.uint8).reshape(-1, 4) if colors else None  # older go2_map: none
+            await broadcast(await asyncio.to_thread(encode, points, {**meta, "source": "go2_map"}, rgba))
     finally:
         sub.close()
         ctx.term()

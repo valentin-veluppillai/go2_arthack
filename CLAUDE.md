@@ -27,7 +27,7 @@ go2/
 │   ├── server.py        # FastMCP tools → ZMQ bridge client
 │   └── __main__.py      # Entry point (stdio transport)
 ├── go2_lidar/           # LiDAR subscriber, logs point counts (python -m go2_lidar)
-├── go2_map/             # Live 3D map from uslam in a Rerun viewer (python -m go2_map), PUB on port 5560
+├── go2_map/             # Live 3D map from uslam in a Rerun viewer, coloured from the camera (python -m go2_map), PUB on port 5560
 ├── go2_yolo/            # YOLO pose detection on the camera stream (python -m go2_yolo)
 │   └── __main__.py      # SUB camera → YOLO → window + PUB boxes/keypoints on port 5557
 ├── go2_follow/          # Keep a person in frame from YOLO boxes, SPACE = deadman (python -m go2_follow)
@@ -143,7 +143,9 @@ All config is via environment variables (defaults in `go2_bridge/config.py`):
 | `GO2_YOLO_PUB_PORT` | `5557` | `go2_yolo` detections PUB port |
 | `GO2_YOLO_HOST` | `GO2_BRIDGE_HOST` | Host running `go2_yolo` (for `go2_follow`, `go2_viz.feed`) |
 | `GO2_YOLO_MODEL` | `yolo26n-pose.pt` | YOLO weights; pose models add keypoints to the detections |
-| `GO2_FEED_HFOV` | `120` | Front camera horizontal FOV (°) used by `go2_viz.feed` for bearing/distance |
+| `GO2_CAMERA_HFOV` | `120` | Front camera horizontal FOV (°): `go2_viz.feed` bearing/distance, `go2_map` camera colours |
+| `GO2_CAMERA_PITCH` | `0` | How far the front camera looks down (°) |
+| `GO2_MAP_COLOR` | `1` | `go2_map` colours map points from the camera (sent as RGBA, alpha = confidence) |
 | `GO2_FEED_VEL_FULL` | `0.4` | Keypoint speed (box heights/s) that maps to velocity 1 |
 | `GO2_FEED_LIDAR` | `1` | `go2_viz.feed` measures the human distance from the SLAM scans (falls back to the camera estimate) |
 

@@ -12,8 +12,17 @@ as free, so cells that were only briefly occupied are cleared again, while
 walls and furniture keep getting hit. Scan points that land in space seen
 free before are shown separately as "moving".
 
+Map points are also coloured from the front camera (bridge PUB port 5556): a
+few times per second the newest frame is shrunk, blurred heavily (so pose
+timing and calibration errors only shift soft gradients) and the map points in
+view are projected into it with the SLAM pose. A coarse depth buffer, which
+also holds the latest scan, keeps surfaces hidden behind others (or behind a
+person) from taking their colour. Each point keeps a running average. Frames
+are skipped while the robot turns fast or the pose is stale.
+
 The cleaned map is also published once per second on ZMQ PUB port 5560 as
-[b"occupancy", meta_json, float32 xyz] for other apps such as go2_viz.
+[b"occupancy", meta_json, float32 xyz, uint8 rgba] for other apps such as
+go2_viz; alpha says how well a point's colour is known (0 = never seen).
 
 uslam only publishes while it is mapping (or localized on a saved map), so by
 default this sends "mapping/start" through the bridge at startup.
@@ -21,18 +30,22 @@ default this sends "mapping/start" through the bridge at startup.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
+import math
 import os
 import time
 
 import numpy as np
 import rerun as rr
 import zmq
+from PIL import Image, ImageFilter
 
 BRIDGE_HOST = os.getenv("GO2_BRIDGE_HOST", "localhost")
 CMD_PORT = int(os.getenv("GO2_ZMQ_CMD_PORT", "5555"))
 SLAM_PORT = int(os.getenv("GO2_ZMQ_SLAM_PORT", "5559"))
+CAMERA_PORT = int(os.getenv("GO2_ZMQ_PUB_PORT", "5556"))
 MAP_PUB_PORT = int(os.getenv("GO2_MAP_PUB_PORT", "5560"))  # cleaned map for other apps
 MAP_VOXEL = float(os.getenv("GO2_MAP_VOXEL", "0.05"))  # metres per map point
 # hide points more than this far above the robot's start height, so indoor ceilings
@@ -52,6 +65,21 @@ MAP_FILTER_CELL = float(os.getenv("GO2_MAP_FILTER_CELL", "0.1"))  # occupancy ce
 MAP_LOG_HZ = 1.0  # full-map refresh rate in the viewer
 # LiDAR position on the body (URDF radar_joint), the origin of every scan ray
 LIDAR_OFFSET = np.array([0.28945, 0.0, -0.046825])
+
+# colours from the front camera
+MAP_COLOR = os.getenv("GO2_MAP_COLOR", "1") == "1"
+MAP_COLOR_HZ = float(os.getenv("GO2_MAP_COLOR_HZ", "3"))  # camera frames used per second
+MAP_COLOR_BLUR = float(os.getenv("GO2_MAP_COLOR_BLUR", "0.03"))  # blur sigma, fraction of the image width
+MAP_COLOR_RANGE = float(os.getenv("GO2_MAP_COLOR_RANGE", "5"))  # m, farther points are not coloured
+CAMERA_HFOV = float(os.getenv("GO2_CAMERA_HFOV", "120"))  # horizontal field of view of the front camera (°)
+CAMERA_PITCH = float(os.getenv("GO2_CAMERA_PITCH", "0"))  # ° the front camera looks down
+CAMERA_POS = np.array([0.32715, 0.0, 0.04297])  # front camera in the body frame (URDF)
+COLOR_WIDTH = 160  # px, frames are shrunk to this width before blurring and sampling
+COLOR_MAX_TURN = 0.6  # rad/s, frames taken while turning faster are skipped (blur, pose lag)
+COLOR_POSE_AGE = 0.3  # s, frames are skipped when the newest pose is older
+COLOR_OCCLUSION = 0.25  # m behind the nearest surface in a depth-buffer cell that still counts as visible
+COLOR_MIN_RATE = 0.1  # share of each new sample in a point's colour at least, so colours follow lighting
+COLOR_FULL_SEEN = 3  # observations for full alpha
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("go2_map")
@@ -88,18 +116,91 @@ def rotate(q: list[float], v: np.ndarray) -> np.ndarray:
 
 
 class VoxelMap:
-    """Keeps one point per voxel; the first point seen in a voxel stays."""
+    """Keeps one point per voxel; the first point seen in a voxel stays. Each voxel also has a
+    camera colour (0–1) and how often it was seen by the camera."""
 
     def __init__(self, voxel: float) -> None:
         self.voxel = voxel
         self.keys = np.empty(0, dtype=np.int64)
         self.points = np.empty((0, 3), dtype=np.float32)
+        self.rgb = np.empty((0, 3), dtype=np.float32)
+        self.seen = np.empty(0, dtype=np.float32)
 
     def add(self, pts: np.ndarray) -> None:
         keys = np.concatenate([self.keys, voxel_keys(pts, self.voxel)])
         points = np.concatenate([self.points, pts])
+        rgb = np.concatenate([self.rgb, np.zeros((len(pts), 3), dtype=np.float32)])
+        seen = np.concatenate([self.seen, np.zeros(len(pts), dtype=np.float32)])
         self.keys, first = np.unique(keys, return_index=True)  # existing voxels come first
-        self.points = points[first]
+        self.points, self.rgb, self.seen = points[first], rgb[first], seen[first]
+
+    def colors(self, sel: np.ndarray) -> np.ndarray:
+        """uint8 colours of the selected voxels: camera colour where seen, height colour elsewhere."""
+        colors = height_colors(self.points[sel, 2])
+        seen = self.seen[sel] > 0
+        colors[seen] = (self.rgb[sel][seen] * 255).round().astype(np.uint8)
+        return colors
+
+    def rgba(self, sel: np.ndarray) -> np.ndarray:
+        """uint8 camera colour of the selected voxels, alpha = how well it is known."""
+        alpha = np.minimum(self.seen[sel] / COLOR_FULL_SEEN, 1.0)
+        return (np.concatenate([self.rgb[sel], alpha[:, None]], axis=1) * 255).round().astype(np.uint8)
+
+
+def turn_rate(a: dict, b: dict) -> float:
+    """Rotation speed (rad/s) between two odometry messages."""
+    dot = abs(float(np.dot(a["orientation"], b["orientation"])))
+    dt = b["stamp"] - a["stamp"]
+    return 2 * math.acos(min(dot, 1.0)) / dt if dt > 0 else 0.0
+
+
+def to_camera(points: np.ndarray, odom: dict) -> np.ndarray:
+    """World points → camera frame: x right, y down, z forward (m)."""
+    qx, qy, qz, qw = odom["orientation"]
+    c = rotate([-qx, -qy, -qz, qw], points - np.asarray(odom["position"])) - CAMERA_POS
+    pitch = math.radians(CAMERA_PITCH)
+    forward = c[:, 0] * math.cos(pitch) - c[:, 2] * math.sin(pitch)
+    up = c[:, 0] * math.sin(pitch) + c[:, 2] * math.cos(pitch)
+    return np.stack([-c[:, 1], -up, forward], axis=1)
+
+
+def colorize(voxels: VoxelMap, jpeg: bytes, odom: dict, scan: np.ndarray) -> int:
+    """Blend one camera frame into the colours of the map points it sees; returns how many."""
+    image = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    width, height = COLOR_WIDTH, max(1, round(COLOR_WIDTH * image.height / image.width))
+    image = image.resize((width, height), Image.BILINEAR)
+    image = image.filter(ImageFilter.GaussianBlur(MAP_COLOR_BLUR * width))
+    pixels = np.asarray(image, dtype=np.float32) / 255
+    focal = (width / 2) / math.tan(math.radians(CAMERA_HFOV) / 2)
+
+    def project(points: np.ndarray):
+        cam = to_camera(points, odom)
+        z = cam[:, 2]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            u = width / 2 + focal * cam[:, 0] / z
+            v = height / 2 + focal * cam[:, 1] / z
+        ok = (z > 0.1) & (z < MAP_COLOR_RANGE) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+        return u.astype(int), v.astype(int), z, ok
+
+    near = np.flatnonzero(np.linalg.norm(voxels.points[:, :2] - np.asarray(odom["position"][:2]), axis=1)
+                          < MAP_COLOR_RANGE)
+    u, v, z, ok = project(voxels.points[near])
+    near, u, v, z = near[ok], u[ok], v[ok], z[ok]
+    if not len(near):
+        return 0
+
+    # depth buffer at half the resolution; the latest scan adds what the map leaves out (people)
+    depth = np.full((height // 2 + 1, width // 2 + 1), np.inf)
+    np.minimum.at(depth, (v // 2, u // 2), z)
+    su, sv, sz, sok = project(scan)
+    np.minimum.at(depth, (sv[sok] // 2, su[sok] // 2), sz[sok])
+    visible = z <= depth[v // 2, u // 2] + COLOR_OCCLUSION
+    near, u, v = near[visible], u[visible], v[visible]
+
+    rate = np.maximum(1 / (voxels.seen[near] + 1), COLOR_MIN_RATE)[:, None]
+    voxels.rgb[near] += (pixels[v, u] - voxels.rgb[near]) * rate
+    voxels.seen[near] += 1
+    return len(near)
 
 
 class OccupancyGrid:
@@ -223,11 +324,20 @@ def show(entity_path: str, entity) -> None:
 def main() -> None:
     ctx = zmq.Context()
     sub = ctx.socket(zmq.SUB)
-    sub.setsockopt(zmq.RCVTIMEO, 1000)  # short, so Ctrl+C is handled promptly
     sub.connect(f"tcp://{BRIDGE_HOST}:{SLAM_PORT}")
     for topic in (b"slam_cloud", b"slam_odom", b"slam_log"):
         sub.subscribe(topic)
     log.info("Subscribed to tcp://%s:%d", BRIDGE_HOST, SLAM_PORT)
+    poller = zmq.Poller()
+    poller.register(sub, zmq.POLLIN)
+    cam = None
+    if MAP_COLOR:
+        cam = ctx.socket(zmq.SUB)
+        cam.setsockopt(zmq.RCVHWM, 2)  # only the newest frame matters
+        cam.connect(f"tcp://{BRIDGE_HOST}:{CAMERA_PORT}")
+        cam.subscribe(b"camera")
+        poller.register(cam, zmq.POLLIN)
+        log.info("Colouring the map from the camera on tcp://%s:%d", BRIDGE_HOST, CAMERA_PORT)
 
     pub = ctx.socket(zmq.PUB)
     pub.setsockopt(zmq.SNDHWM, 2)  # a stalled subscriber gets the newest maps, not a growing backlog
@@ -241,10 +351,16 @@ def main() -> None:
     voxels = VoxelMap(MAP_VOXEL)
     grid = OccupancyGrid(MAP_FILTER_CELL)
 
-    def map_points() -> np.ndarray:
-        """Whole map with moving objects removed (no ceiling cut)."""
-        return voxels.points[grid.odds_at(voxels.points) >= 0] if MAP_FILTER else voxels.points
+    def occupied() -> np.ndarray:
+        """Mask of the whole map with moving objects removed (no ceiling cut)."""
+        return grid.odds_at(voxels.points) >= 0 if MAP_FILTER else np.ones(len(voxels.points), dtype=bool)
     odom: dict | None = None
+    t_odom = 0.0  # time.time() of the newest pose
+    turning = 0.0  # rad/s between the last two poses
+    scan = np.empty((0, 3), dtype=np.float32)  # latest scan
+    jpeg: bytes | None = None  # newest camera frame, not used yet
+    t_colored = 0.0
+    colored = 0  # points coloured since the last log line
     moving = np.empty((0, 3), dtype=np.float32)
     path: list[list[float]] = []
     z_ref: float | None = None  # robot height at the first pose, reference for the ceiling cut
@@ -254,10 +370,13 @@ def main() -> None:
 
     try:
         while True:
-            try:
+            events = dict(poller.poll(1000))  # short, so Ctrl+C is handled promptly
+            topic = None
+            if sub in events:
                 topic, *frames = sub.recv_multipart()
-            except zmq.Again:
-                topic = None
+            if cam is not None and cam in events:
+                while cam.poll(0):
+                    _cam_topic, jpeg = cam.recv_multipart()
 
             if topic == b"slam_cloud":
                 t_rx = time.time()
@@ -275,7 +394,9 @@ def main() -> None:
                 clouds += 1
                 dirty = True
             elif topic == b"slam_odom":
-                odom = json.loads(frames[0])
+                previous, odom, t_odom = odom, json.loads(frames[0]), time.time()
+                if previous is not None:
+                    turning = turn_rate(previous, odom)
                 if z_ref is None:
                     z_ref = odom["position"][2]
                 show("world/robot", rr.Transform3D(translation=odom["position"],
@@ -287,26 +408,36 @@ def main() -> None:
                 log.info("uslam: %s", frames[0].decode(errors="replace"))
 
             now = time.time()
+            if (jpeg is not None and odom is not None and len(voxels.points)
+                    and now - t_colored >= 1.0 / MAP_COLOR_HZ):
+                # a frame taken while turning fast is blurred and lags the pose: skip it
+                if now - t_odom < COLOR_POSE_AGE and turning < COLOR_MAX_TURN:
+                    colored += colorize(voxels, jpeg, odom, scan)
+                    t_colored, dirty = now, True
+                jpeg = None
+
             if dirty and now - t_logged >= 1.0 / MAP_LOG_HZ:
-                shown = below_ceiling(voxels.points, z_ref or 0.0, MAP_CEILING)
-                if MAP_FILTER:
-                    shown = shown[grid.odds_at(shown) >= 0]  # drop cells cleared by later rays
-                show("world/map", rr.Points3D(shown, colors=height_colors(shown[:, 2]), radii=MAP_VOXEL / 2))
+                keep = occupied()
+                shown = keep.copy()  # drop cells cleared by later rays, and the ceiling
+                if MAP_CEILING > 0:
+                    shown &= voxels.points[:, 2] < (z_ref or 0.0) + MAP_CEILING
+                show("world/map", rr.Points3D(voxels.points[shown], colors=voxels.colors(shown), radii=MAP_VOXEL / 2))
                 if len(path) > 1:
                     show("world/path", rr.LineStrips3D([path], colors=[255, 140, 0]))
-                occupied = map_points()
+                points = voxels.points[keep]
                 pub.send_multipart([b"occupancy", json.dumps({
                     "stamp": now,
-                    "count": len(occupied),
+                    "count": len(points),
                     "voxel": MAP_VOXEL,
                     "z_ref": z_ref,
                     "robot": {"position": odom["position"], "orientation": odom["orientation"]} if odom else None,
-                }).encode(), occupied.astype("<f4").tobytes()])
-                log.info("map: %d points shown (%d scans), extent %s m, %d moving points in the last scan",
-                         len(shown), clouds,
+                }).encode(), points.astype("<f4").tobytes(), voxels.rgba(keep).tobytes()])
+                log.info("map: %d points shown (%d scans), extent %s m, %d moving points in the last scan, "
+                         "%d coloured from the camera (%d points)",
+                         int(shown.sum()), clouds,
                          [round(float(v), 1) for v in np.ptp(voxels.points, axis=0)] if len(voxels.points) else "-",
-                         len(moving))
-                t_logged, dirty = now, False
+                         len(moving), int((voxels.seen > 0).sum()), colored)
+                t_logged, dirty, colored = now, False, 0
 
             if not clouds and now - t_start > 10 and now - t_rx > 10:
                 log.warning("No SLAM scans yet — mapping only publishes while active. Check the uslam "
@@ -316,12 +447,15 @@ def main() -> None:
         pass
     finally:
         sub.close()
+        if cam is not None:
+            cam.close()
         pub.close()
         ctx.term()
         if MAP_PLY != "0" and len(voxels.points):
-            points = map_points()
+            keep = occupied()
+            points = voxels.points[keep]
             path_ply = MAP_PLY or time.strftime("go2_map_%Y%m%d_%H%M%S.ply")
-            save_ply(path_ply, points, height_colors(points[:, 2]))
+            save_ply(path_ply, points, voxels.colors(keep))
             log.info("Saved %d map points to %s", len(points), os.path.abspath(path_ply))
         log.info("Mapping keeps running on the robot. 'slam mapping/stop' saves the map and "
                  "overwrites the robot's single saved map.")

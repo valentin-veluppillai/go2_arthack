@@ -19,7 +19,8 @@
 // Inside the cone two colour channels are screen-blended,
 //   final = 1 − (1 − wr·robot)(1 − wh·human),  wh = engagement, wr = 1 − wh
 // robot: time-of-flight false colour; human: the map point's photographic RGB
-// (from the server, a blurred test texture for now). Engagement rises with
+// (go2_map's camera colours, or a blurred test texture offline), weighted by
+// how well that colour is known (alpha). Engagement rises with
 // proximity and gesture velocity, so the human channel dominates up close.
 // The human channel only shows where the human is: a soft vignette shaped by
 // the detected bounding box (angles seen from the front camera) and limited in
@@ -453,12 +454,13 @@ function humanMask(x, y, z) {
 // ── map / targets ────────────────────────────────────────────────
 
 let rawMap = null;                   // last map as received: Float32Array x, y, z (z-up)
-let rawRGB = null;                   // and its human-channel colours, Uint8Array r, g, b (or null)
+let rawRGBA = null;                  // and its human-channel colours, Uint8Array r, g, b, a (or null)
 let rawNormals = null;               // and its surface normals
 let targets = new Float32Array(0);   // filtered map in three.js coords (y-up)
 let targetNormals = new Float32Array(0);
 let targetColors = new Float32Array(0);
 let targetRGB = new Float32Array(0);  // human channel, 0–1
+let targetAlpha = new Float32Array(0); // how well each human-channel colour is known, 0–1 (0 = no colour)
 let mapHasRGB = false;
 let targetCount = 0;
 let structureCount = 0;              // targets [0, structureCount) are above the floor, the rest is floor
@@ -509,7 +511,8 @@ function rebuildTargets() {
   targetNormals = new Float32Array(keep.length * 3);
   targetColors = new Float32Array(keep.length * 3);
   targetRGB = new Float32Array(keep.length * 3);
-  mapHasRGB = !!rawRGB;
+  targetAlpha = new Float32Array(keep.length);
+  mapHasRGB = !!rawRGBA;
   keep.forEach((i, k) => {
     targets[k * 3] = rawMap[i * 3];             // x → x
     targets[k * 3 + 1] = rawMap[i * 3 + 2];     // z → y (up)
@@ -518,7 +521,10 @@ function rebuildTargets() {
     targetNormals[k * 3 + 1] = rawNormals[i * 3 + 2];
     targetNormals[k * 3 + 2] = -rawNormals[i * 3 + 1];
     ramp(PALETTE, (z[i] - floor) / Math.max(top - floor, 0.1), targetColors, k * 3);
-    if (rawRGB) for (let c = 0; c < 3; c++) targetRGB[k * 3 + c] = rawRGB[i * 3 + c] / 255;
+    if (rawRGBA) {
+      for (let c = 0; c < 3; c++) targetRGB[k * 3 + c] = rawRGBA[i * 4 + c] / 255;
+      targetAlpha[k] = rawRGBA[i * 4 + 3] / 255;
+    }
   });
   const first = targetCount === 0;
   targetCount = keep.length;
@@ -634,10 +640,10 @@ function fitView() {
   camera.updateProjectionMatrix();
 }
 
-function onMap(header, xyz, normals, rgb) {
+function onMap(header, xyz, normals, rgba) {
   rawMap = xyz;
   rawNormals = normals;
-  rawRGB = rgb;
+  rawRGBA = rgba;
   rebuildTargets();
   if (!hasFitView && targetCount) { fitView(); hasFitView = true; }
   if (header.robot) {
@@ -677,7 +683,7 @@ function connect() {
     const offset = 4 + headerLen + ((4 - ((4 + headerLen) % 4)) % 4);
     const n = header.count * 3;
     onMap(header, new Float32Array(ev.data, offset, n), new Float32Array(ev.data, offset + n * 4, n),
-          header.rgb ? new Uint8Array(ev.data, offset + n * 8, n) : null);
+          header.rgba ? new Uint8Array(ev.data, offset + n * 8, header.count * 4) : null);
   };
 }
 connect();
@@ -802,7 +808,7 @@ function step(dt, time) {
         if (tof) ramp(VIRIDIS, Math.sqrt(d2) / params.fovRange, paint, 0);
         else if (byHeight) { paint[0] = targetColors[q] * 0.9; paint[1] = targetColors[q + 1] * 0.9; paint[2] = targetColors[q + 2] * 0.9; }
         else { paint[0] = paintRGB.r; paint[1] = paintRGB.g; paint[2] = paintRGB.b; }
-        const w = wh > 0 ? wh * humanMask(drawn[p], drawn[p + 1], drawn[p + 2]) : 0;
+        const w = wh > 0 && targetAlpha[ti] > 0 ? wh * targetAlpha[ti] * humanMask(drawn[p], drawn[p + 1], drawn[p + 2]) : 0;
         if (w > 0) for (let c = 0; c < 3; c++) paint[c] = 1 - (1 - (1 - w) * paint[c]) * (1 - w * targetRGB[q + c]);
         const lum = 0.2126 * paint[0] + 0.7152 * paint[1] + 0.0722 * paint[2];
         for (let c = 0; c < 3; c++) colors[p + c] = g + (lum + (paint[c] - lum) * conf - g) * sat;
