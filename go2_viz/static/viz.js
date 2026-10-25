@@ -67,7 +67,7 @@ const inputs = {
   scale: 0,          // perceived human scale 0–1
   humanBearing: 0,   // direction of the human relative to the body (deg, + = left)
   headYaw: 0,        // head yaw relative to the body (deg, + = left)
-  headPitch: 0,      // head pitch (deg, + = up)
+  headPitch: 0,      // head pitch (deg, + = up); accepted but ignored: the cone always stays horizontal
   coneAngle: 60,     // view cone, full angle (deg)
   trackHuman: false, // head follows the human
   boxLeft: 0, boxRight: 0, boxTop: 0, boxBottom: 0, // human bounding box seen from the camera (deg, + = left / up)
@@ -119,6 +119,8 @@ const params = {
   coneFade: 3,        // s for a focus particle to fade out once the cone has moved away from it
   saturationFloor: 0.4, // in-cone saturation at posture confidence 0 (1 at confidence 1)
   saturationBoost: 1.5, // pushes in-cone colours (robot and human channel) away from their gray
+  cameraBoost: 2.5,   // exaggerates the camera colours' saturation (applied once per map, before blending)
+  cameraGate: 0.15,   // camera colours below this saturation (HSV) turn gray instead of being boosted
   baseGray: 0.48,     // brightness of the base particles outside the cone
   background: "#0a0a0b", // dark and neutral, for contrast with the particles
   showBase: true,     // render toggles, so a demo can show only what it needs
@@ -355,9 +357,8 @@ function randomMarkerTile() {
 const GRAY = 0x9a9da3;
 const robot = new THREE.Group();
 robot.add(new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), new THREE.MeshBasicMaterial({ color: GRAY })));
-const head = new THREE.Object3D();      // yaw/pitch relative to the body; x forward
+const head = new THREE.Object3D();      // x forward; kept level by aimHead (yaw only)
 head.position.copy(HEAD_OFFSET);
-head.rotation.order = "YZX";            // yaw about y first, then pitch about the turned z
 robot.add(head);
 const fovCone = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
   color: GRAY, transparent: true, opacity: 0.06, depthWrite: false, side: THREE.DoubleSide,
@@ -392,31 +393,39 @@ const robotQuatTarget = new THREE.Quaternion();
 let robotSource = "virtual";
 const headPos = new THREE.Vector3(), headDir = new THREE.Vector3();
 const headQuat = new THREE.Quaternion();
-const look = { yaw: 0, pitch: 0 };      // eased head angles (rad)
+const look = { yaw: 0 };                // eased head yaw relative to the body's heading (rad)
+const UP = new THREE.Vector3(0, 1, 0);
+const levelQuat = new THREE.Quaternion();
+
+// the body's heading in the horizontal plane (rad, + = left), ignoring its pitch and roll
+function bodyHeading() {
+  const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(robot.quaternion);
+  return Math.atan2(-forward.z, forward.x);
+}
 
 function placeHuman() {
-  const bearing = THREE.MathUtils.degToRad(inputs.humanBearing);
-  const dir = new THREE.Vector3(Math.cos(bearing), 0, -Math.sin(bearing)).applyQuaternion(robot.quaternion);
-  dir.y = 0;
-  dir.normalize();
+  const bearing = bodyHeading() + THREE.MathUtils.degToRad(inputs.humanBearing);
+  const dir = new THREE.Vector3(Math.cos(bearing), 0, -Math.sin(bearing));
   human.position.copy(robot.position).addScaledVector(dir, inputs.distance);
   human.position.y = floorY + HUMAN_HEIGHT / 2;
   human.visible = params.showHuman;
 }
 
+// The cone always lies in the horizontal plane: only yaw is applied (the body's heading plus head yaw,
+// or the direction of the human), and any pitch or roll of the body from the SLAM pose is cancelled.
 function aimHead(dt) {
-  let yaw = THREE.MathUtils.degToRad(inputs.headYaw), pitch = THREE.MathUtils.degToRad(inputs.headPitch);
+  robot.updateMatrixWorld(true);
+  const bodyYaw = bodyHeading();
+  let yaw = THREE.MathUtils.degToRad(inputs.headYaw);
   if (inputs.trackHuman) {
-    // aim at the human's chest, in the body's frame
-    const chest = human.position.clone().setY(floorY + 1.3);
-    const v = robot.worldToLocal(chest).sub(HEAD_OFFSET);
-    yaw = Math.atan2(-v.z, v.x);
-    pitch = Math.atan2(v.y, Math.hypot(v.x, v.z));
+    const v = human.position.clone().sub(head.getWorldPosition(headPos));
+    yaw = Math.atan2(-v.z, v.x) - bodyYaw;
   }
   const k = 1 - Math.exp(-dt * 4);
   look.yaw += (Math.atan2(Math.sin(yaw - look.yaw), Math.cos(yaw - look.yaw))) * k;  // shortest way round
-  look.pitch += (pitch - look.pitch) * k;
-  head.rotation.set(0, look.yaw, look.pitch);
+  // head orientation in the world = pure yaw; as a child of the (possibly tilted) robot: undo its rotation
+  levelQuat.setFromAxisAngle(UP, bodyYaw + look.yaw);
+  head.quaternion.copy(robot.quaternion).invert().multiply(levelQuat);
   robot.updateMatrixWorld(true);
   head.getWorldPosition(headPos);
   head.getWorldQuaternion(headQuat);
@@ -473,6 +482,7 @@ let targetNormals = new Float32Array(0);
 let targetColors = new Float32Array(0);
 let targetRGB = new Float32Array(0);  // human channel, 0–1
 let targetAlpha = new Float32Array(0); // how well each human-channel colour is known, 0–1 (0 = no colour)
+let targetSource = new Int32Array(0);  // index of each target in the map as received
 let mapHasRGB = false;
 let targetCount = 0;
 let structureCount = 0;              // targets [0, structureCount) are above the floor, the rest is floor
@@ -501,6 +511,27 @@ function percentile(values, p) {
 
 function isFocus(i) { return i >= BASE_MAX; }
 
+// Camera colours, gated and exaggerated: a colour's own saturation (HSV) passes a soft gate, so the faint
+// tints of gray surfaces (blur, white balance, noise) turn gray instead of being boosted into a chromatic
+// mess; colours above the gate get their saturation multiplied by cameraBoost.
+const CAMERA_GATE_SOFTNESS = 0.1; // saturation range over which the gate opens
+
+function applyCameraColors() {
+  if (!rawRGBA) return;
+  const lo = params.cameraGate, hi = params.cameraGate + CAMERA_GATE_SOFTNESS;
+  for (let k = 0; k < targetCount; k++) {
+    const i = targetSource[k];
+    const r = rawRGBA[i * 4] / 255, g = rawRGBA[i * 4 + 1] / 255, b = rawRGBA[i * 4 + 2] / 255;
+    const max = Math.max(r, g, b), sat = max > 0 ? (max - Math.min(r, g, b)) / max : 0;
+    const gain = THREE.MathUtils.smoothstep(sat, lo, hi) * params.cameraBoost;
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    targetRGB[k * 3] = THREE.MathUtils.clamp(lum + (r - lum) * gain, 0, 1);
+    targetRGB[k * 3 + 1] = THREE.MathUtils.clamp(lum + (g - lum) * gain, 0, 1);
+    targetRGB[k * 3 + 2] = THREE.MathUtils.clamp(lum + (b - lum) * gain, 0, 1);
+    targetAlpha[k] = rawRGBA[i * 4 + 3] / 255;
+  }
+}
+
 function rebuildTargets() {
   if (!rawMap) return;
   const n = rawMap.length / 3;
@@ -524,6 +555,7 @@ function rebuildTargets() {
   targetColors = new Float32Array(keep.length * 3);
   targetRGB = new Float32Array(keep.length * 3);
   targetAlpha = new Float32Array(keep.length);
+  targetSource = Int32Array.from(keep);
   mapHasRGB = !!rawRGBA;
   keep.forEach((i, k) => {
     targets[k * 3] = rawMap[i * 3];             // x → x
@@ -533,13 +565,10 @@ function rebuildTargets() {
     targetNormals[k * 3 + 1] = rawNormals[i * 3 + 2];
     targetNormals[k * 3 + 2] = -rawNormals[i * 3 + 1];
     ramp(PALETTE, (z[i] - floor) / Math.max(top - floor, 0.1), targetColors, k * 3);
-    if (rawRGBA) {
-      for (let c = 0; c < 3; c++) targetRGB[k * 3 + c] = rawRGBA[i * 4 + c] / 255;
-      targetAlpha[k] = rawRGBA[i * 4 + 3] / 255;
-    }
   });
   const first = targetCount === 0;
   targetCount = keep.length;
+  applyCameraColors();
   inCone = new Uint8Array(targetCount);
   coneList = [];
   buildCells();
@@ -839,6 +868,14 @@ function step(dt, time) {
       }
     } else if (params.colorMode === "height") {
       colors[p] = targetColors[q] * glow; colors[p + 1] = targetColors[q + 1] * glow; colors[p + 2] = targetColors[q + 2] * glow;
+    } else if (params.colorMode === "camera") {
+      // verification: every particle shows its (gated, boosted) camera colour at full strength, so
+      // misplaced hues stand out; points the camera never saw stay dark
+      if (targetAlpha[ti] > 0) {
+        colors[p] = targetRGB[q]; colors[p + 1] = targetRGB[q + 1]; colors[p + 2] = targetRGB[q + 2];
+      } else {
+        colors[p] = colors[p + 1] = colors[p + 2] = 0.12;
+      }
     } else if (params.colorMode === "speed") {
       ramp(PALETTE, Math.min(speed / 1.5, 1), colors, p);
     } else {
@@ -865,7 +902,6 @@ humanFolder.add(inputs, "humanBearing", -180, 180, 1).name("bearing (°)");
 
 const robotFolder = gui.addFolder("Robot & canvas");
 robotFolder.add(inputs, "headYaw", -180, 180, 1).name("head yaw (°)");
-robotFolder.add(inputs, "headPitch", -60, 60, 1).name("head pitch (°)");
 robotFolder.add(inputs, "coneAngle", 15, 90, 1).name("cone angle (°)");
 robotFolder.add(inputs, "trackHuman").name("head tracks human");
 robotFolder.add(inputs, "entropy", 0, 1, 0.01).name("entropy / noise");
@@ -919,9 +955,11 @@ lookFolder.add(params, "size", 0.005, 0.2, 0.005).onChange((v) => { material.uni
 lookFolder.add(params, "opacity", 0.05, 1, 0.01).onChange((v) => { material.uniforms.opacity.value = v; });
 lookFolder.add(params, "saturationFloor", 0, 1, 0.01).name("saturation floor");
 lookFolder.add(params, "saturationBoost", 0.5, 3, 0.05).name("saturation boost");
+lookFolder.add(params, "cameraBoost", 0, 5, 0.05).name("camera boost").onChange(applyCameraColors);
+lookFolder.add(params, "cameraGate", 0, 0.8, 0.01).name("camera gate").onChange(applyCameraColors);
 lookFolder.add(params, "baseGray", 0.1, 0.9, 0.01).name("base gray");
 lookFolder.addColor(params, "background").onChange(applyBackground);
-lookFolder.add(params, "colorMode", ["gray", "height", "speed", "white"]);
+const colorModeCtrl = lookFolder.add(params, "colorMode", ["gray", "height", "speed", "white", "camera"]);
 lookFolder.add(params, "ceiling", 0.3, 5, 0.1).name("ceiling (m)").onChange(rebuildTargets);
 lookFolder.add(params, "paintMode", ["time of flight", "height", "color"]).name("cone paint");
 lookFolder.addColor(params, "paintColor").name("paint colour").onChange((v) => paintRGB.set(v));
@@ -1014,10 +1052,16 @@ presetInput.onchange = async () => {
   } catch {}
 })();
 
-// h: hide / show every UI element (panel, HUD, overlays, cursor) for a clean demo view; f: fullscreen
+// h: hide / show every UI element (panel, HUD, overlays, cursor) for a clean demo view; f: fullscreen;
+// c: switch to the camera colour mode and back, to check go2_map's camera colours against the room
+let colorModeBeforeCamera = "gray";
 window.addEventListener("keydown", (ev) => {
   if (ev.target.closest?.("input, textarea, select") || ev.ctrlKey || ev.metaKey || ev.altKey) return;
   if (ev.key === "h") document.body.classList.toggle("clean");
+  else if (ev.key === "c") {
+    if (params.colorMode === "camera") colorModeCtrl.setValue(colorModeBeforeCamera);
+    else { colorModeBeforeCamera = params.colorMode; colorModeCtrl.setValue("camera"); }
+  }
   else if (ev.key === "f") {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen();
