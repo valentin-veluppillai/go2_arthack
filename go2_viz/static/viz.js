@@ -15,7 +15,7 @@
 //   movement   → focus density in the cone
 //   entropy    → dispersion of focus particles away from the surfaces
 //   confidence → saturation of the in-cone colouring (viridis, by distance)
-//   scale      → share of particles drawn as diamond/crosshair markers
+//   scale      → share of particles in the cone drawn as diamond/crosshair markers
 // Inside the cone two colour channels are screen-blended,
 //   final = 1 − (1 − wr·robot)(1 − wh·human),  wh = engagement, wr = 1 − wh
 // robot: time-of-flight false colour; human: the map point's photographic RGB
@@ -40,6 +40,7 @@ const RESEED = 0.1;       // share of base particles sent to a random spot of ea
 const MAX_HOP = 0.5;      // m, longer hops are skipped so particles don't cross gaps
 const FADE_IN = 2.0;      // s, (re)appearing particles fade in from the background
 const FADE_OUT = 0.6;     // s, leaving particles fade out
+const MARKER_PRESENCE = 0.5; // cone colour (0–1) a particle needs to be drawn as a marker
 const CONE_REFRESH = 0.1; // s, how often the set of map points inside the cone is recomputed
 const JITTER_RANGE = 0.06; // m, largest jitter offset along the normal at jitter = 1
 const JITTER_RATE = 0.35;  // chance per 1/60 s that a particle re-rolls its jitter offset (×4 at jitter = 1)
@@ -114,7 +115,8 @@ const params = {
   paintColor: "#ff8c1a",
   humanChannel: true, // screen-blend the human (photographic) channel into the cone paint
   fovRange: 4,        // m
-  desaturate: 3,      // s for a particle to lose its colour after leaving the field of view
+  desaturate: 8,      // s for a particle to lose its colour after leaving the field of view
+  coneFade: 3,        // s for a focus particle to fade out once the cone has moved away from it
   saturationFloor: 0.4, // in-cone saturation at posture confidence 0 (1 at confidence 1)
   saturationBoost: 1.5, // pushes in-cone colours (robot and human channel) away from their gray
   baseGray: 0.48,     // brightness of the base particles outside the cone
@@ -725,7 +727,7 @@ function step(dt, time) {
   const cosHalf = Math.cos(THREE.MathUtils.degToRad(inputs.coneAngle / 2));
   const range2 = params.fovRange * params.fovRange;
   const gain = dt / SATURATE, loss = dt / params.desaturate;
-  const fadeIn = dt / FADE_IN, fadeOut = dt / FADE_OUT;
+  const fadeIn = dt / FADE_IN, fadeOut = dt / FADE_OUT, coneFadeOut = dt / params.coneFade;
   const markerSwitch = params.markerChange * dt;
   const conf = derived.saturation;
   const tof = params.paintMode === "time of flight", byHeight = params.paintMode === "height";
@@ -747,7 +749,8 @@ function step(dt, time) {
       }
       alpha[i] = Math.min(1, alpha[i] + fadeIn);
     } else {
-      alpha[i] = Math.max(0, alpha[i] - fadeOut);
+      // focus particles left behind by the cone linger; removed particles go quickly
+      alpha[i] = Math.max(0, alpha[i] - (relocate[i] ? coneFadeOut : fadeOut));
       if (alpha[i] === 0) {
         if (relocate[i] && alive[i]) { relocate[i] = 0; const t0 = pickConeTarget(); if (t0 >= 0) respawn(i, t0); }
         continue;
@@ -803,7 +806,8 @@ function step(dt, time) {
     const inside = d2 < range2 && along > 0 && along * along >= cosHalf * cosHalf * d2;
     const sat = saturation[i] = inside ? Math.min(1, saturation[i] + gain) : Math.max(0, saturation[i] - loss);
 
-    if (markerRoll[i] >= derived.markerRatio) { markerTile[i] = -1; inflate[i] = 1; }
+    // markers only where the cone is or recently was: they last while the cone colour is above half
+    if (markerRoll[i] >= derived.markerRatio || sat < MARKER_PRESENCE) { markerTile[i] = -1; inflate[i] = 1; }
     else if (markerTile[i] < 0 || Math.random() < markerSwitch) {
       markerTile[i] = randomMarkerTile();
       // every new marker gets its own size; squared, so most stay modest and a few are large
@@ -923,7 +927,8 @@ lookFolder.add(params, "paintMode", ["time of flight", "height", "color"]).name(
 lookFolder.addColor(params, "paintColor").name("paint colour").onChange((v) => paintRGB.set(v));
 lookFolder.add(params, "humanChannel").name("human channel");
 lookFolder.add(params, "fovRange", 0.5, 10, 0.1).name("view range (m)");
-lookFolder.add(params, "desaturate", 0.2, 10, 0.1).name("desaturate (s)");
+lookFolder.add(params, "desaturate", 0.2, 30, 0.1).name("desaturate (s)");
+lookFolder.add(params, "coneFade", 0.2, 15, 0.1).name("cone fade (s)");
 const markerFolder = tuning.addFolder("Markers");
 markerFolder.add(params, "markerChange", 0, 5, 0.05).name("changes / s");
 markerFolder.add(params, "outlineChance", 0, 1, 0.01).name("outline chance");
