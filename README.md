@@ -269,7 +269,8 @@ Open http://localhost:8090. The panel has the test controls from the spec: **Hum
 **Tuning and demos.**
 - **Presets** (panel → Presets) save every panel setting plus the camera view: *save to file* / *load from file* (JSON), *save in browser* (restored on the next load in that browser), *save to server* (writes `GO2_VIZ_PRESET`, which every browser loads at startup unless it has its own browser preset), *reset to defaults*.
 - **Render** switches each layer on or off: base particles, focus particles, robot, view cone, human column, HUD. *Particles only* turns off everything but the particles.
-- **Hotkeys:** `h` hides all UI (panel, HUD, overlays, mouse cursor) for a clean view, `f` toggles fullscreen.
+- **View:** by default the camera follows the robot from 2.5 m behind and 1.4 m above, looking 15° down along its horizontal heading, and eases after it as it walks and turns (Tuning → Camera: *follow robot*, *behind*, *above*, *look down*). Turn *follow robot* off (or press `v`) for the free orbit with the mouse.
+- **Hotkeys:** `h` hides all UI (panel, HUD, overlays, mouse cursor) for a clean view, `f` toggles fullscreen, `v` switches between the follow camera and the free orbit, `c` toggles the camera colour mode.
 - [go2_viz/TUNING.md](go2_viz/TUNING.md) lists every variable that shapes the look, with file and line: panel settings, the input → visual formulas, renderer constants and the data-side environment variables.
 
 ```bash

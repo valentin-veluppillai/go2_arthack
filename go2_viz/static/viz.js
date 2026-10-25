@@ -129,7 +129,11 @@ const params = {
   showFov: true,
   showHuman: true,
   showHud: true,
-  autoRotate: true,
+  followRobot: true,  // view from behind and above the robot, following it; off = free orbit
+  followBack: 2.5,    // m behind the robot
+  followHeight: 1.4,  // m above the robot
+  followPitch: 15,    // degrees the view looks down
+  autoRotate: true,   // orbit mode only
   rotateSpeed: 0.15,
 };
 
@@ -176,6 +180,7 @@ const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerH
 camera.position.set(8, 6, 8);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+controls.enabled = !params.followRobot;
 
 // ── particles ────────────────────────────────────────────────────
 
@@ -395,6 +400,7 @@ const headPos = new THREE.Vector3(), headDir = new THREE.Vector3();
 const headQuat = new THREE.Quaternion();
 const look = { yaw: 0 };                // eased head yaw relative to the body's heading (rad)
 const UP = new THREE.Vector3(0, 1, 0);
+const follow = { yaw: 0, snap: true };  // follow camera: eased heading; snap = jump there on the next frame
 const levelQuat = new THREE.Quaternion();
 
 // the body's heading in the horizontal plane (rad, + = left), ignoring its pitch and roll
@@ -972,6 +978,10 @@ markerFolder.add(params, "markerChange", 0, 5, 0.05).name("changes / s");
 markerFolder.add(params, "outlineChance", 0, 1, 0.01).name("outline chance");
 markerFolder.add(params, "markerInflate", 1, 6, 0.1).name("max inflation");
 const cam = tuning.addFolder("Camera");
+const followCtrl = cam.add(params, "followRobot").name("follow robot").onChange((v) => { controls.enabled = !v; follow.snap = true; });
+cam.add(params, "followBack", 0.5, 10, 0.1).name("behind (m)");
+cam.add(params, "followHeight", 0, 6, 0.1).name("above (m)");
+cam.add(params, "followPitch", 0, 60, 1).name("look down (°)");
 cam.add(params, "autoRotate");
 cam.add(params, "rotateSpeed", -3, 3, 0.1);
 cam.add({ fit: fitView }, "fit").name("fit view");
@@ -1053,7 +1063,8 @@ presetInput.onchange = async () => {
 })();
 
 // h: hide / show every UI element (panel, HUD, overlays, cursor) for a clean demo view; f: fullscreen;
-// c: switch to the camera colour mode and back, to check go2_map's camera colours against the room
+// c: switch to the camera colour mode and back, to check go2_map's camera colours against the room;
+// v: switch between the follow camera and the free orbit
 let colorModeBeforeCamera = "gray";
 window.addEventListener("keydown", (ev) => {
   if (ev.target.closest?.("input, textarea, select") || ev.ctrlKey || ev.metaKey || ev.altKey) return;
@@ -1062,6 +1073,7 @@ window.addEventListener("keydown", (ev) => {
     if (params.colorMode === "camera") colorModeCtrl.setValue(colorModeBeforeCamera);
     else { colorModeBeforeCamera = params.colorMode; colorModeCtrl.setValue("camera"); }
   }
+  else if (ev.key === "v") followCtrl.setValue(!params.followRobot);
   else if (ev.key === "f") {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen();
@@ -1120,6 +1132,28 @@ function updateHud(now) {
   }
 }
 
+// ── follow camera ────────────────────────────────────────────────
+// Behind and above the robot along its horizontal heading, looking down by followPitch; it eases after the
+// robot so walking and turning stay smooth. The orbit target is kept in front of the view, so switching to
+// the free orbit continues from here.
+
+const FOLLOW_EASE = 0.6; // s, time constant
+
+function followRobot(dt) {
+  const heading = bodyHeading();
+  const k = follow.snap ? 1 : 1 - Math.exp(-dt / FOLLOW_EASE);
+  follow.yaw += Math.atan2(Math.sin(heading - follow.yaw), Math.cos(heading - follow.yaw)) * k;
+  const forward = new THREE.Vector3(Math.cos(follow.yaw), 0, -Math.sin(follow.yaw));
+  const goal = robot.position.clone().addScaledVector(forward, -params.followBack);
+  goal.y += params.followHeight;
+  camera.position.lerp(goal, k);
+  const pitch = THREE.MathUtils.degToRad(params.followPitch);
+  const view = forward.multiplyScalar(Math.cos(pitch)).setY(-Math.sin(pitch));
+  controls.target.copy(camera.position).addScaledVector(view, params.followBack);
+  camera.lookAt(controls.target);
+  follow.snap = false;
+}
+
 // ── loop ─────────────────────────────────────────────────────────
 
 const clock = new THREE.Clock();
@@ -1134,9 +1168,12 @@ function frame() {
   aimHead(dt);
   buildFovCone();
   step(dt, clock.elapsedTime);
-  controls.autoRotate = params.autoRotate;
-  controls.autoRotateSpeed = params.rotateSpeed;
-  controls.update();
+  if (params.followRobot) followRobot(dt);
+  else {
+    controls.autoRotate = params.autoRotate;
+    controls.autoRotateSpeed = params.rotateSpeed;
+    controls.update();
+  }
 
   renderer.render(scene, camera);
   updateHud(performance.now());
